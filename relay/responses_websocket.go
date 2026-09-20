@@ -226,6 +226,15 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 
 func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState, create responsesWSCreateRequest) (apiErr *types.NewAPIError) {
 	policy := service.RequestPolicy(c)
+	// The token model redirect runs before the connection lock, the token model
+	// limit and the original-model context are derived, so all of them see the
+	// logical model. It is mirrored onto the typed request because the upstream
+	// frame is rebuilt from it.
+	modelRequest := middleware.ModelRequest{Model: create.Request.Model}
+	if mapErr := middleware.ApplyTokenModelMapping(c, &modelRequest); mapErr != nil {
+		return newResponsesWSInvalidRequestError(mapErr)
+	}
+	create.Request.Model = modelRequest.Model
 	modelName := create.Request.Model
 	started := time.Now()
 	var info *relaycommon.RelayInfo

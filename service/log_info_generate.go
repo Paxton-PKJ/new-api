@@ -72,6 +72,11 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 		return
 	}
 	other.SetAdmin("use_channel", ctx.GetStringSlice("use_channel"))
+	// Token model redirect: the client-facing model name is the token owner's own
+	// configuration, so it is public in their consume/error logs.
+	if clientModel := common.GetContextKeyString(ctx, constant.ContextKeyTokenModelMappingClientModel); clientModel != "" {
+		other.SetPublic("client_model", clientModel)
+	}
 	if relayInfo != nil {
 		if billingModel := relayInfo.GetBillingModelName(); billingModel != "" && billingModel != relayInfo.OriginModelName {
 			other.SetAdmin("billing_model", billingModel)

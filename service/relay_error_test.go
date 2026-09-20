@@ -211,3 +211,22 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 	AppendRelayLogAdminInfo(untouched, nil, other)
 	assert.NotContains(t, other.Snapshot()["admin_info"], "request_policy", "requests without decisions do not carry an empty record")
 }
+
+// A token model redirect is the token owner's own configuration, so the
+// client-facing model name is public in their consume and error logs.
+func TestAppendRelayLogAdminInfoExposesTokenMappedClientModel(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(c, constant.ContextKeyTokenModelMappingClientModel, "claude-opus-4-8")
+	mapped := model.NewLogOther()
+	AppendRelayLogAdminInfo(c, nil, mapped)
+	snapshot := mapped.Snapshot()
+	assert.Equal(t, "claude-opus-4-8", snapshot["client_model"])
+	adminInfo, ok := snapshot["admin_info"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, adminInfo, "client_model", "the client model is displayed to the token owner, not admin-only")
+
+	unmapped, _ := gin.CreateTestContext(httptest.NewRecorder())
+	unmappedOther := model.NewLogOther()
+	AppendRelayLogAdminInfo(unmapped, nil, unmappedOther)
+	assert.NotContains(t, unmappedOther.Snapshot(), "client_model")
+}

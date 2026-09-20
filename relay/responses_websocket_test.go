@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	appdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -26,6 +27,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 // normalizeResponsesWSTestMessage runs the read-loop envelope parse followed by
@@ -144,6 +146,60 @@ func TestCheckResponsesWSModelAccessMatchesHTTPTokenLimits(t *testing.T) {
 			assert.False(t, service.ShouldRetryRelayError(c, apiErr, 2))
 		})
 	}
+}
+
+// The token model redirect must resolve before the connection lock and the
+// token model limit are evaluated, and the rewritten body must be the source
+// the upstream frame is built from.
+func TestRunCallAppliesTokenModelMappingBeforeLockAndModelAccess(t *testing.T) {
+	newCall := func(t *testing.T, mapping map[string]string) (*gin.Context, responsesWSCreateRequest) {
+		t.Helper()
+		create, _, err := normalizeResponsesWSTestMessage([]byte(`{"type":"response.create","response":{"model":"claude-opus-4-8","input":"hi"}}`))
+		require.NoError(t, err)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(create.Body)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		if mapping != nil {
+			common.SetContextKey(c, constant.ContextKeyTokenModelMapping, mapping)
+		}
+		common.SetContextKey(c, constant.ContextKeyTokenModelLimitEnabled, true)
+		common.SetContextKey(c, constant.ContextKeyTokenModelLimit, map[string]bool{"other-model": true})
+		return c, create
+	}
+
+	t.Run("redirected model passes the lock and is judged by the model limit", func(t *testing.T) {
+		c, create := newCall(t, map[string]string{"claude-opus-4-8": "dsv4f"})
+		session := &responsesWSSession{lockedModel: "dsv4f"}
+		apiErr := session.runCall(c, &responsesWSCallState{}, create)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+		assert.Contains(t, apiErr.Error(), "dsv4f")
+		assert.NotContains(t, apiErr.Error(), "locked to model")
+		storage, err := common.GetBodyStorage(c)
+		require.NoError(t, err)
+		body, err := storage.Bytes()
+		require.NoError(t, err)
+		assert.Equal(t, "dsv4f", gjson.GetBytes(body, "model").String())
+		assert.Equal(t, "claude-opus-4-8", c.GetString(string(constant.ContextKeyTokenModelMappingClientModel)))
+		require.NoError(t, storage.Close())
+	})
+
+	t.Run("unmapped client model still fails the connection lock", func(t *testing.T) {
+		c, create := newCall(t, nil)
+		session := &responsesWSSession{lockedModel: "dsv4f"}
+		apiErr := session.runCall(c, &responsesWSCallState{}, create)
+		require.NotNil(t, apiErr)
+		assert.ErrorContains(t, apiErr, `locked to model "dsv4f"`)
+	})
+
+	t.Run("cyclic mapping is rejected as an invalid request", func(t *testing.T) {
+		c, create := newCall(t, map[string]string{"claude-opus-4-8": "b", "b": "claude-opus-4-8"})
+		session := &responsesWSSession{lockedModel: "claude-opus-4-8"}
+		apiErr := session.runCall(c, &responsesWSCallState{}, create)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+		assert.ErrorIs(t, apiErr, model.ErrTokenModelMappingCycle)
+	})
 }
 
 func TestSelectResponsesWSChannelAcceptsNativeResponsesChannelTypes(t *testing.T) {
@@ -599,6 +655,31 @@ func TestResponsesWSPassthroughPreservesRawPricingParameters(t *testing.T) {
 	payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
 	require.Nil(t, apiErr)
 	assert.JSONEq(t, `{"type":"response.create","generate":false,"model":"gpt-5.1","input":"hi","vendor":{"tier":"premium"}}`, string(payload))
+	storage, err := common.GetBodyStorage(c)
+	require.NoError(t, err)
+	require.NoError(t, storage.Close())
+}
+
+// In pass-through mode the upstream frame is the stored request body, so the
+// token model redirect must be visible there and in the relay info.
+func TestResponsesWSPassthroughForwardsTokenMappedModel(t *testing.T) {
+	create, _, err := normalizeResponsesWSTestMessage([]byte(`{"type":"response.create","generate":false,"response":{"model":"claude-opus-4-8","input":"hi","vendor":{"tier":"premium"},"stream":true}}`))
+	require.NoError(t, err)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(create.Body)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	common.SetContextKey(c, constant.ContextKeyTokenModelMapping, map[string]string{"claude-opus-4-8": "dsv4f"})
+	modelRequest := middleware.ModelRequest{Model: create.Request.Model}
+	require.NoError(t, middleware.ApplyTokenModelMapping(c, &modelRequest))
+	create.Request.Model = modelRequest.Model
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, create.Request.Model)
+	common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+	common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: true})
+	info := relaycommon.GenRelayInfoResponses(c, &create.Request)
+	payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+	require.Nil(t, apiErr)
+	assert.JSONEq(t, `{"type":"response.create","generate":false,"model":"dsv4f","input":"hi","vendor":{"tier":"premium"}}`, string(payload))
+	assert.Equal(t, "dsv4f", info.OriginModelName)
 	storage, err := common.GetBodyStorage(c)
 	require.NoError(t, err)
 	require.NoError(t, storage.Close())

@@ -292,7 +292,9 @@ jobs:
         run: |
           set -o pipefail
           git fetch --no-tags "$UPSTREAM_REPO" +main:upstream-main
-          files=$(git diff --name-only upstream-main...HEAD -- 'web/**' |
+          # ':(top)' resolves the pathspec from the repository root, because this
+          # step's working directory is web/.
+          files=$(git diff --name-only upstream-main...HEAD -- ':(top)web/**' |
             sed -n 's|^web/||p' |
             while read -r file; do [ -f "$file" ] && echo "$file"; done)
           if [ -z "$files" ]; then
