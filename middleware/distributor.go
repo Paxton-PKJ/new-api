@@ -50,6 +50,15 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
+		if shouldSelectChannel {
+			// 令牌级模型重定向：在 Model Limits / AutoGroups / Channel Select 之前把客户端模型改写为逻辑模型
+			if mapErr := ApplyTokenModelMapping(c, modelRequest); mapErr != nil {
+				abortWithOpenAiMessage(c, http.StatusBadRequest,
+					i18n.T(c, i18n.MsgDistributorTokenModelMappingCycle, map[string]any{"Model": modelRequest.Model}),
+					types.ErrorCodeInvalidRequest)
+				return
+			}
+		}
 		_, pinned, _ := constraints.ResolvedPin()
 		if !pinned {
 			// Select a channel for the user

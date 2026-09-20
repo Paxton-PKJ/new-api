@@ -521,6 +521,13 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 	} else {
 		c.Set("token_model_limit_enabled", false)
 	}
+	if token.GetModelMapping() != "" {
+		if mapping := token.GetModelMappingMap(); len(mapping) > 0 {
+			common.SetContextKey(c, constant.ContextKeyTokenModelMapping, mapping)
+		} else {
+			logger.LogWarn(c, "token %d has an invalid model_mapping, mapping skipped", token.Id)
+		}
+	}
 	common.SetContextKey(c, constant.ContextKeyTokenGroup, token.Group)
 	common.SetContextKey(c, constant.ContextKeyTokenCrossGroupRetry, token.CrossGroupRetry)
 	if token.AutoGroups != "" {
