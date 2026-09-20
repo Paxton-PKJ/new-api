@@ -69,6 +69,14 @@ type ModelMappingEditorProps = {
   onCommit?: (value: string) => void
   draftRequest?: ModelMappingDraftRequest | null
   onDraftRequestHandled?: () => void
+  /** Column headers / aria-labels and the JSON textbox label. Defaults keep the channel wording. */
+  labels?: { from: string; to: string; json?: string }
+  /** Row input placeholders. Defaults: 'gpt-3.5-turbo' / 'gpt-3.5-turbo-0125'. */
+  placeholders?: { from: string; to: string }
+  /** Object used by "Fill Template". Default: { 'gpt-3.5-turbo': 'gpt-3.5-turbo-0125' }. */
+  template?: Record<string, string>
+  /** Hint under the visual table and above the JSON editor. Defaults keep the channel wording. */
+  hints?: { visual?: string; json?: string }
 }
 
 type MappingRow = {
@@ -80,6 +88,11 @@ type MappingRow = {
 const DUPLICATE_MAPPING_SENTINEL = '{ "duplicate_source_models": '
 /** Show the row filter once the table is long enough to need scanning. */
 const MAPPING_FILTER_THRESHOLD = 6
+const DEFAULT_FROM_PLACEHOLDER = 'gpt-3.5-turbo'
+const DEFAULT_TO_PLACEHOLDER = 'gpt-3.5-turbo-0125'
+const DEFAULT_MAPPING_TEMPLATE: Record<string, string> = {
+  [DEFAULT_FROM_PLACEHOLDER]: DEFAULT_TO_PLACEHOLDER,
+}
 
 function getDuplicateSources(rows: MappingRow[]): string[] {
   const seen = new Set<string>()
@@ -101,6 +114,19 @@ function getDuplicateSources(rows: MappingRow[]): string[] {
 export function ModelMappingEditor(props: ModelMappingEditorProps) {
   const { t } = useTranslation()
   const inputsId = useId()
+  const fromLabel = props.labels?.from ?? t('Request Model Name')
+  const toLabel = props.labels?.to ?? t('Upstream Model Name')
+  const jsonLabel = props.labels?.json ?? t('Model Mapping')
+  const fromPlaceholder = props.placeholders?.from ?? DEFAULT_FROM_PLACEHOLDER
+  const toPlaceholder = props.placeholders?.to ?? DEFAULT_TO_PLACEHOLDER
+  const visualHint =
+    props.hints?.visual ??
+    t(
+      'Users call the model on the left. The platform forwards the request to the upstream model on the right.'
+    )
+  const jsonHint =
+    props.hints?.json ??
+    t('JSON keys are request model names; values are upstream model names.')
   const [mode, setMode] = useState<'visual' | 'json'>('visual')
   const [rows, setRows] = useState<MappingRow[]>([])
   const [jsonValue, setJsonValue] = useState(props.value)
@@ -330,7 +356,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
 
   const handleFillTemplate = () => {
     const template = JSON.stringify(
-      { 'gpt-3.5-turbo': 'gpt-3.5-turbo-0125' },
+      props.template ?? DEFAULT_MAPPING_TEMPLATE,
       null,
       2
     )
@@ -434,11 +460,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
         )}
 
         <TabsContent value='visual' className='space-y-2'>
-          <p className='text-muted-foreground text-xs'>
-            {t(
-              'Users call the model on the left. The platform forwards the request to the upstream model on the right.'
-            )}
-          </p>
+          <p className='text-muted-foreground text-xs'>{visualHint}</p>
           {rows.length > 0 ? (
             <div className='space-y-2'>
               {showFilter && (
@@ -460,8 +482,8 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
                 </div>
               )}
               <div className='grid grid-cols-[1fr_1fr_auto] gap-2 text-sm font-medium'>
-                <div>{t('Request Model Name')}</div>
-                <div>{t('Upstream Model Name')}</div>
+                <div>{fromLabel}</div>
+                <div>{toLabel}</div>
                 <div className='w-10' />
               </div>
               {visibleRows.map((row) => (
@@ -476,11 +498,11 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
                     onValueChange={(value) =>
                       handleRowChange(row.id, 'from', value)
                     }
-                    placeholder='gpt-3.5-turbo'
+                    placeholder={fromPlaceholder}
                     emptyText='No matching items'
                     allowCustomValue
                     disabled={props.disabled}
-                    aria-label={t('Request Model Name')}
+                    aria-label={fromLabel}
                   />
                   <ComboboxInput
                     id={rowInputId(row.id, 'to')}
@@ -489,11 +511,11 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
                     onValueChange={(value) =>
                       handleRowChange(row.id, 'to', value)
                     }
-                    placeholder='gpt-3.5-turbo-0125'
+                    placeholder={toPlaceholder}
                     emptyText='No matching items'
                     allowCustomValue
                     disabled={props.disabled}
-                    aria-label={t('Upstream Model Name')}
+                    aria-label={toLabel}
                   />
                   <Button
                     type='button'
@@ -534,11 +556,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
           </Button>
         </TabsContent>
         <TabsContent value='json' className='space-y-2'>
-          <p className='text-muted-foreground text-sm'>
-            {t(
-              'JSON keys are request model names; values are upstream model names.'
-            )}
-          </p>
+          <p className='text-muted-foreground text-sm'>{jsonHint}</p>
           <JsonCodeEditor
             value={jsonValue}
             onChange={handleJsonChange}
@@ -546,7 +564,7 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
             disabled={props.disabled}
             className={jsonError ? 'border-destructive' : undefined}
             aria-invalid={Boolean(jsonError)}
-            ariaLabel={t('Model Mapping')}
+            ariaLabel={jsonLabel}
           />
         </TabsContent>
       </Tabs>

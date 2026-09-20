@@ -1133,6 +1133,13 @@ export function DetailsDialog(props: DetailsDialogProps) {
             <ResponseModelDetails observation={other.response_model} />
           </DetailSection>
         )}
+        {other?.client_model && (
+          <DetailRow
+            label={t('Client Model')}
+            value={other.client_model}
+            mono
+          />
+        )}
         {/* Model mapping for logs without response observations */}
         {!other?.response_model &&
           other?.is_model_mapped &&

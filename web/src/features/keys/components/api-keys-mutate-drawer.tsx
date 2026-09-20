@@ -62,6 +62,7 @@ import {
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { ModelMappingEditor } from '@/features/channels/components/model-mapping-editor'
 import { RelatedPolicyLink } from '@/features/system-settings/request-policies/related-policy-link'
 import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
@@ -716,6 +717,50 @@ export function ApiKeysMutateDrawer({
                           </FormControl>
                           <FormDescription>
                             {t('Limit which models can be used with this key')}
+                          </FormDescription>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name='model_mapping'
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>{t('Model Redirect')}</FormLabel>
+                          <FormControl>
+                            <ModelMappingEditor
+                              value={field.value || ''}
+                              onChange={field.onChange}
+                              disabled={isSubmitting}
+                              targetModelOptions={models}
+                              labels={{
+                                from: t('Client request model'),
+                                to: t('Redirect target model'),
+                                json: t('Model Redirect'),
+                              }}
+                              placeholders={{
+                                from: 'claude-opus-4-8',
+                                to: 'target-model',
+                              }}
+                              template={{
+                                'claude-opus-4-8': 'target-model',
+                              }}
+                              hints={{
+                                visual: t(
+                                  'Requests sent with the model on the left are handled as the model on the right.'
+                                ),
+                                json: t(
+                                  'JSON keys are client request model names; values are redirect target model names.'
+                                ),
+                              }}
+                            />
+                          </FormControl>
+                          <FormDescription>
+                            {t(
+                              'Rewrites the model name sent by the client before model limits, routing and billing. The target model must be available to this key.'
+                            )}
                           </FormDescription>
                           <FormMessage />
                         </FormItem>

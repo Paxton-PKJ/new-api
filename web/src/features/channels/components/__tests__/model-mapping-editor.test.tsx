@@ -235,6 +235,63 @@ test('a draft request can ask for the request field of an existing row', async (
   ).toHaveLength(1)
 })
 
+test('caller supplied labels, placeholders, template, and hints replace the channel wording', async () => {
+  const user = userEvent.setup()
+  const onChange = vi.fn()
+  render(
+    <ModelMappingEditor
+      value=''
+      onChange={onChange}
+      labels={{
+        from: 'Client request model',
+        to: 'Redirect target model',
+        json: 'Model Redirect',
+      }}
+      placeholders={{ from: 'claude-opus-4-8', to: 'target-model' }}
+      template={{ 'claude-opus-4-8': 'target-model' }}
+      hints={{
+        visual:
+          'Requests sent with the model on the left are handled as the model on the right.',
+        json: 'JSON keys are client request model names; values are redirect target model names.',
+      }}
+    />
+  )
+
+  expect(
+    screen.getByText(
+      'Requests sent with the model on the left are handled as the model on the right.'
+    )
+  ).toBeVisible()
+
+  await user.click(screen.getByRole('button', { name: 'Add Mapping' }))
+
+  expect(screen.getByText('Client request model')).toBeVisible()
+  expect(screen.getByText('Redirect target model')).toBeVisible()
+  await user.type(screen.getByPlaceholderText('claude-opus-4-8'), 'fast-model')
+  await user.type(screen.getByPlaceholderText('target-model'), 'upstream-fast')
+  expect(
+    screen.getByRole('combobox', { name: 'Client request model' })
+  ).toHaveValue('fast-model')
+  expect(
+    screen.getByRole('combobox', { name: 'Redirect target model' })
+  ).toHaveValue('upstream-fast')
+  expect(onChange).toHaveBeenLastCalledWith(
+    '{\n  "fast-model": "upstream-fast"\n}'
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Fill Template' }))
+  await user.click(screen.getByRole('tab', { name: 'JSON' }))
+
+  expect(screen.getByRole('textbox', { name: 'Model Redirect' })).toHaveValue(
+    '{\n  "claude-opus-4-8": "target-model"\n}'
+  )
+  expect(
+    screen.getByText(
+      'JSON keys are client request model names; values are redirect target model names.'
+    )
+  ).toBeVisible()
+})
+
 test('commit fires once an edit settles on Enter or when focus leaves, not per keystroke', async () => {
   const user = userEvent.setup()
   const onCommit = vi.fn()

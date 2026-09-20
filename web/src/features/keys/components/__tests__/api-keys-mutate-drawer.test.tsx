@@ -19,6 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, test } from 'vitest'
 
+import type { ApiKey } from '../../types'
+
 const { createInstance } = await import('i18next')
 const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { QueryClient, QueryClientProvider } =
@@ -37,6 +39,7 @@ type ApiMethod = (url: string, data?: unknown) => Promise<{ data: unknown }>
 type MockableApi = {
   get: ApiMethod
   post: ApiMethod
+  put: ApiMethod
 }
 type RenderedDrawer = {
   queryClient: InstanceType<typeof QueryClient>
@@ -45,9 +48,38 @@ type RenderedDrawer = {
 const apiClient = api as unknown as MockableApi
 const originalGet = apiClient.get
 const originalPost = apiClient.post
+const originalPut = apiClient.put
 let renderedDrawer: RenderedDrawer | null = null
 
-function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
+const storedApiKey: ApiKey = {
+  id: 7,
+  name: 'mapped',
+  key: 'sk-mapped',
+  status: 1,
+  remain_quota: 0,
+  used_quota: 0,
+  unlimited_quota: true,
+  expired_time: -1,
+  created_time: 1,
+  accessed_time: 0,
+  group: 'auto',
+  auto_groups: null,
+  cross_group_retry: true,
+  model_limits_enabled: false,
+  model_limits: '',
+  model_mapping: '{"claude-opus-4-8":"dsv4f"}',
+  allow_ips: '',
+}
+
+type ApiFixtures = {
+  updatedPayloads?: Array<Record<string, unknown>>
+}
+
+function installApiFixtures(
+  createdPayloads: Array<Record<string, unknown>>,
+  fixtures: ApiFixtures = {}
+) {
+  const updatedPayloads = fixtures.updatedPayloads ?? []
   apiClient.get = async (url) => {
     switch (url) {
       case '/api/status':
@@ -72,6 +104,8 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
             data: { groups: ['vip', 'default'], max_count: 3 },
           },
         }
+      case '/api/token/7':
+        return { data: { success: true, data: storedApiKey } }
       default:
         throw new Error(`Unexpected GET ${url}`)
     }
@@ -82,9 +116,15 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
     createdPayloads.push(data as Record<string, unknown>)
     return { data: { success: true, data: {} } }
   }
+  apiClient.put = async (url, data) => {
+    expect(url).toBe('/api/token/')
+    expect(data && typeof data === 'object').toBeTruthy()
+    updatedPayloads.push(data as Record<string, unknown>)
+    return { data: { success: true, data: {} } }
+  }
 }
 
-async function renderCreateDrawer(): Promise<void> {
+async function renderDrawer(currentRow?: ApiKey): Promise<void> {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -125,7 +165,11 @@ async function renderCreateDrawer(): Promise<void> {
     <QueryClientProvider client={queryClient}>
       <I18nextProvider i18n={i18n}>
         <ApiKeysProvider>
-          <ApiKeysMutateDrawer open onOpenChange={() => undefined} />
+          <ApiKeysMutateDrawer
+            open
+            onOpenChange={() => undefined}
+            currentRow={currentRow}
+          />
         </ApiKeysProvider>
       </I18nextProvider>
     </QueryClientProvider>
@@ -196,6 +240,7 @@ function selectComboboxOption(
 afterEach(() => {
   apiClient.get = originalGet
   apiClient.post = originalPost
+  apiClient.put = originalPut
   localStorage.clear()
   if (renderedDrawer) {
     renderedDrawer.queryClient.clear()
@@ -207,7 +252,7 @@ describe('API keys mutate drawer Auto group integration', () => {
   test('inherits the root Auto order and sends an empty override for every batch-created key', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
     installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
+    await renderDrawer()
 
     const groupTrigger = getControlByLabel('Group')
     expect(groupTrigger.textContent?.includes('auto')).toBe(true)
@@ -240,7 +285,7 @@ describe('API keys mutate drawer Auto group integration', () => {
   test('preserves an unsaved custom order and mode after Auto to ordinary to Auto changes', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
     installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
+    await renderDrawer()
 
     const autoOrderControl = getControlByLabel('Auto group order')
     const addGroupTrigger = autoOrderControl.querySelector<HTMLButtonElement>(
@@ -276,5 +321,73 @@ describe('API keys mutate drawer Auto group integration', () => {
     fireEvent.click(findButton('Save changes', true))
     await waitFor(() => expect(createdPayloads).toHaveLength(1))
     expect(createdPayloads[0]?.auto_groups).toEqual(['vip'])
+  })
+})
+
+describe('API keys mutate drawer model redirect integration', () => {
+  function openAdvancedSettings(): void {
+    fireEvent.click(findButton('Advanced Settings', true))
+  }
+
+  test('creates a key with the redirect entered in the visual editor', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderDrawer()
+
+    openAdvancedSettings()
+    fireEvent.click(findButton('Add Mapping', true))
+    changeInput(
+      screen.getByPlaceholderText('claude-opus-4-8'),
+      'claude-opus-4-8'
+    )
+    changeInput(screen.getByPlaceholderText('target-model'), 'dsv4f')
+    changeInput(getControlByLabel('Name'), 'redirected')
+
+    fireEvent.click(findButton('Save changes', true))
+
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+    expect(JSON.parse(String(createdPayloads[0]?.model_mapping))).toEqual({
+      'claude-opus-4-8': 'dsv4f',
+    })
+  })
+
+  test('shows a stored redirect when editing and submits it unchanged', async () => {
+    const updatedPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures([], { updatedPayloads })
+    await renderDrawer(storedApiKey)
+
+    openAdvancedSettings()
+
+    expect(screen.getByDisplayValue('claude-opus-4-8')).toBeVisible()
+    expect(screen.getByDisplayValue('dsv4f')).toBeVisible()
+
+    fireEvent.click(findButton('Save changes', true))
+
+    await waitFor(() => expect(updatedPayloads).toHaveLength(1))
+    expect(JSON.parse(String(updatedPayloads[0]?.model_mapping))).toEqual({
+      'claude-opus-4-8': 'dsv4f',
+    })
+  })
+
+  test('keeps an invalid JSON redirect in the drawer and blocks the request', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderDrawer()
+
+    openAdvancedSettings()
+    fireEvent.click(screen.getByRole('tab', { name: 'JSON' }))
+    fireEvent.input(screen.getByRole('textbox', { name: 'Model Redirect' }), {
+      target: { value: '{' },
+    })
+    changeInput(getControlByLabel('Name'), 'broken')
+
+    fireEvent.click(findButton('Save changes', true))
+
+    expect(
+      await screen.findByText(
+        'Model redirect must be a JSON object with non-empty string keys and values'
+      )
+    ).toBeVisible()
+    expect(createdPayloads).toHaveLength(0)
   })
 })

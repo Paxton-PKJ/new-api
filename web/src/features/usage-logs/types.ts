@@ -197,6 +197,8 @@ export interface LogOtherData {
   cache_creation_ratio_1h?: number
   is_model_mapped?: boolean
   upstream_model_name?: string
+  // Model name the client sent, set when a token model redirect rewrote it.
+  client_model?: string
   // Diagnostic only. Whether the names disagree is derived in the UI via
   // isResponseModelMismatch so old rows follow the current comparison rule.
   response_model?: {
