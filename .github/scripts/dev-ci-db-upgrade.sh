@@ -189,7 +189,8 @@ columns_snapshot() {
         WHERE table_schema = current_schema() AND table_name = 'tokens' ORDER BY column_name"
       ;;
     sqlite)
-      run_sql "SELECT name, type, CASE notnull WHEN 0 THEN 'YES' ELSE 'NO' END FROM pragma_table_info('tokens') ORDER BY name"
+      # "notnull" is a keyword and must stay quoted in this CASE expression.
+      run_sql "SELECT name, type, CASE \"notnull\" WHEN 0 THEN 'YES' ELSE 'NO' END FROM pragma_table_info('tokens') ORDER BY name"
       ;;
   esac | tr '\t' '|' | tr -d '\r'
 }
