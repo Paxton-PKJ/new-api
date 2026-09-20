@@ -1,0 +1,290 @@
+# fork-only dev workflow, exclude from upstream PR.
+#
+# Authoritative validation pipeline for fork development branches (feat/**):
+# backend static checks and tests, a three-database migration matrix, the
+# token model_mapping upgrade/idempotency path with Redis enabled, and the
+# frontend checks that upstream ci.yml does not run. Upstream CI (ci.yml) is
+# deliberately left untouched; do not include this file in an upstream PR.
+
+name: Dev CI
+
+on:
+  push:
+    branches: ['feat/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_REPO: https://github.com/QuantumNous/new-api.git
+
+jobs:
+  backend:
+    name: Backend (vet, build, tests, database matrix, upgrade)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GOWORK: 'off'
+    services:
+      mysql80:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: '123456'
+          MYSQL_DATABASE: new_api_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=123456"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+      mysql57:
+        image: mysql:5.7
+        env:
+          MYSQL_ROOT_PASSWORD: '123456'
+          MYSQL_DATABASE: new_api_test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=123456"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+      postgres15:
+        image: postgres:15
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: new_api_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready --username=root --dbname=new_api_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+      postgres96:
+        image: postgres:9.6
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: new_api_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready --username=root --dbname=new_api_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            relaykit/go.sum
+
+      - name: Install database clients
+        run: |
+          if ! command -v mysql >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq mysql-client
+          fi
+          if ! command -v psql >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          if ! command -v sqlite3 >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq sqlite3
+          fi
+          mysql --version
+          psql --version
+          sqlite3 --version
+
+      - name: Create frontend embed placeholder
+        run: |
+          mkdir -p web/dist
+          touch web/dist/index.html
+
+      - name: gofmt changed Go files
+        run: |
+          git fetch --no-tags "$UPSTREAM_REPO" +main:upstream-main
+          files=$(git diff --name-only upstream-main...HEAD -- '*.go' | while read -r file; do
+            [ -f "$file" ] && echo "$file"
+          done)
+          if [ -z "$files" ]; then
+            echo "no Go files changed relative to upstream main"
+          else
+            echo "changed Go files:"
+            echo "$files"
+            unformatted=$(gofmt -l $files)
+            if [ -n "$unformatted" ]; then
+              echo "::error::gofmt reported unformatted files:"
+              echo "$unformatted"
+              exit 1
+            fi
+            echo "gofmt clean"
+          fi
+
+      - name: Vet and build root and relaykit modules
+        run: |
+          go vet ./...
+          (cd relaykit && go vet ./...)
+          go build ./...
+          (cd relaykit && go build ./...)
+
+      - name: Test root and relaykit modules (Redis enabled)
+        run: make test
+        env:
+          REDIS_CONN_STRING: redis://127.0.0.1:6379
+
+      - name: Database matrix - MySQL 8.0 migration
+        run: |
+          set -o pipefail
+          mysql --host=127.0.0.1 --port=3306 --user=root --password=123456 \
+            --execute 'DROP DATABASE IF EXISTS na_m80; CREATE DATABASE na_m80 DEFAULT CHARACTER SET utf8mb4'
+          TEST_MYSQL_DSN='root:123456@tcp(127.0.0.1:3306)/na_m80?charset=utf8mb4&parseTime=True&loc=Local' \
+            go test ./controller -run 'TestTokenMigrationFromChar48ToVarchar128MySQL$' -count=1 -v 2>&1 | tee /tmp/db-matrix-m80.log
+          if grep -q -- '--- SKIP' /tmp/db-matrix-m80.log; then
+            echo "::error::MySQL 8.0 migration test was skipped"
+            exit 1
+          fi
+          grep -q -- '--- PASS' /tmp/db-matrix-m80.log || {
+            echo "::error::MySQL 8.0 migration test reported no PASS line"
+            exit 1
+          }
+
+      - name: Database matrix - MySQL 5.7 migration
+        run: |
+          set -o pipefail
+          mysql --host=127.0.0.1 --port=3307 --user=root --password=123456 \
+            --execute 'DROP DATABASE IF EXISTS na_m57; CREATE DATABASE na_m57 DEFAULT CHARACTER SET utf8mb4'
+          TEST_MYSQL_DSN='root:123456@tcp(127.0.0.1:3307)/na_m57?charset=utf8mb4&parseTime=True&loc=Local' \
+            go test ./controller -run 'TestTokenMigrationFromChar48ToVarchar128MySQL$' -count=1 -v 2>&1 | tee /tmp/db-matrix-m57.log
+          if grep -q -- '--- SKIP' /tmp/db-matrix-m57.log; then
+            echo "::error::MySQL 5.7 migration test was skipped"
+            exit 1
+          fi
+          grep -q -- '--- PASS' /tmp/db-matrix-m57.log || {
+            echo "::error::MySQL 5.7 migration test reported no PASS line"
+            exit 1
+          }
+
+      - name: Database matrix - PostgreSQL 15 migration
+        run: |
+          set -o pipefail
+          PGPASSWORD=123456 psql --host=127.0.0.1 --port=5432 --username=root --dbname=postgres \
+            --quiet --command 'DROP DATABASE IF EXISTS na_p15' --command 'CREATE DATABASE na_p15'
+          TEST_POSTGRES_DSN='host=127.0.0.1 user=root password=123456 dbname=na_p15 port=5432 sslmode=disable' \
+            go test ./controller -run 'TestTokenMigrationFromChar48ToVarchar128Postgres$' -count=1 -v 2>&1 | tee /tmp/db-matrix-p15.log
+          if grep -q -- '--- SKIP' /tmp/db-matrix-p15.log; then
+            echo "::error::PostgreSQL 15 migration test was skipped"
+            exit 1
+          fi
+          grep -q -- '--- PASS' /tmp/db-matrix-p15.log || {
+            echo "::error::PostgreSQL 15 migration test reported no PASS line"
+            exit 1
+          }
+
+      - name: Database matrix - PostgreSQL 9.6 migration
+        run: |
+          set -o pipefail
+          PGPASSWORD=123456 psql --host=127.0.0.1 --port=5433 --username=root --dbname=postgres \
+            --quiet --command 'DROP DATABASE IF EXISTS na_p96' --command 'CREATE DATABASE na_p96'
+          TEST_POSTGRES_DSN='host=127.0.0.1 user=root password=123456 dbname=na_p96 port=5433 sslmode=disable' \
+            go test ./controller -run 'TestTokenMigrationFromChar48ToVarchar128Postgres$' -count=1 -v 2>&1 | tee /tmp/db-matrix-p96.log
+          if grep -q -- '--- SKIP' /tmp/db-matrix-p96.log; then
+            echo "::error::PostgreSQL 9.6 migration test was skipped"
+            exit 1
+          fi
+          grep -q -- '--- PASS' /tmp/db-matrix-p96.log || {
+            echo "::error::PostgreSQL 9.6 migration test reported no PASS line"
+            exit 1
+          }
+
+      - name: Database matrix - SQLite migration
+        run: |
+          set -o pipefail
+          go test ./controller \
+            -run 'TestTokenMigrationFromChar48ToVarchar128$|TestTokenAutoMigrateUsesVarchar128KeyColumn' \
+            -count=1 -v 2>&1 | tee /tmp/db-matrix-sqlite.log
+          if grep -q -- '--- SKIP' /tmp/db-matrix-sqlite.log; then
+            echo "::error::SQLite migration test was skipped"
+            exit 1
+          fi
+          grep -q -- '--- PASS' /tmp/db-matrix-sqlite.log || {
+            echo "::error::SQLite migration test reported no PASS line"
+            exit 1
+          }
+
+      - name: Build baseline (upstream main) and head binaries
+        run: |
+          git worktree add /tmp/baseline upstream-main
+          mkdir -p /tmp/baseline/web/dist
+          touch /tmp/baseline/web/dist/index.html
+          (cd /tmp/baseline && go build -o /tmp/new-api-baseline .)
+          go build -o /tmp/new-api-head .
+          ls -l /tmp/new-api-baseline /tmp/new-api-head
+
+      - name: Upgrade and idempotency - SQLite
+        run: bash .github/scripts/dev-ci-db-upgrade.sh sqlite
+
+      - name: Upgrade and idempotency - MySQL 8.0
+        run: bash .github/scripts/dev-ci-db-upgrade.sh mysql
+
+      - name: Upgrade and idempotency - PostgreSQL 15
+        run: bash .github/scripts/dev-ci-db-upgrade.sh postgres
+
+  frontend:
+    name: Frontend (typecheck, lint, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.0'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Test
+        run: bun run test
+
+      - name: Build
+        run: DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat ../VERSION) bun run build
