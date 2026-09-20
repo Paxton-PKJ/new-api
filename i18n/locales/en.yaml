@@ -53,6 +53,7 @@ token.db_error: "Invalid token, database query error, please contact administrat
 token.auto_groups_too_many: "A token can select at most {{.Max}} Auto groups"
 token.auto_groups_duplicate: "Auto group {{.Group}} is duplicated"
 token.auto_groups_invalid: "Auto group {{.Group}} is unavailable or unauthorized"
+token.model_mapping_invalid: "Invalid model redirect configuration: {{.Error}}"
 
 # Redemption messages
 redemption.name_length: "Redemption code name length must be between 1-20"
@@ -282,6 +283,7 @@ distributor.no_available_channel: "No available channel for model {{.Model}} und
 distributor.no_available_channel_task_plugin: "No available channel for model {{.Model}} under group {{.Group}}: the model is claimed by a task plugin, which has no enabled channel serving it (distributor)"
 distributor.invalid_midjourney_request: "Invalid Midjourney request: {{.Error}}"
 distributor.invalid_request_parse_model: "Invalid request, unable to parse model"
+distributor.token_model_mapping_cycle: "Token model redirect for model {{.Model}} contains a cycle"
 
 # Custom OAuth provider messages
 custom_oauth.not_found: "Custom OAuth provider not found"

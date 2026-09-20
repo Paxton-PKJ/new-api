@@ -60,6 +60,7 @@ const (
 	MsgTokenAutoGroupsTooMany    = "token.auto_groups_too_many"
 	MsgTokenAutoGroupsDuplicate  = "token.auto_groups_duplicate"
 	MsgTokenAutoGroupsInvalid    = "token.auto_groups_invalid"
+	MsgTokenModelMappingInvalid  = "token.model_mapping_invalid"
 )
 
 // Redemption related messages
@@ -331,6 +332,7 @@ const (
 	MsgDistributorNoAvailableChannelTaskPlugin = "distributor.no_available_channel_task_plugin"
 	MsgDistributorInvalidMidjourney            = "distributor.invalid_midjourney_request"
 	MsgDistributorInvalidParseModel            = "distributor.invalid_request_parse_model"
+	MsgDistributorTokenModelMappingCycle       = "distributor.token_model_mapping_cycle"
 )
 
 // Custom OAuth provider related messages
