@@ -32,9 +32,29 @@ func (input *tokenAutoGroupsInput) UnmarshalJSON(data []byte) error {
 	return common.Unmarshal(data, &input.Groups)
 }
 
+type tokenModelMappingInput struct {
+	Set   bool
+	Value *string
+}
+
+func (input *tokenModelMappingInput) UnmarshalJSON(data []byte) error {
+	input.Set = true
+	if strings.TrimSpace(string(data)) == "null" {
+		input.Value = nil
+		return nil
+	}
+	var value string
+	if err := common.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	input.Value = &value
+	return nil
+}
+
 type tokenRequest struct {
 	model.Token
-	AutoGroups tokenAutoGroupsInput `json:"auto_groups"`
+	AutoGroups   tokenAutoGroupsInput   `json:"auto_groups"`
+	ModelMapping tokenModelMappingInput `json:"model_mapping"`
 }
 
 type tokenResponse struct {
@@ -121,6 +141,26 @@ func setTokenAutoGroups(c *gin.Context, token *model.Token, groups []string) boo
 	}
 
 	if err := token.SetAutoGroups(groups); err != nil {
+		common.ApiError(c, err)
+		return false
+	}
+	return true
+}
+
+func setTokenModelMapping(c *gin.Context, token *model.Token, input tokenModelMappingInput) bool {
+	if !input.Set {
+		return true
+	}
+	raw := ""
+	if input.Value != nil {
+		raw = *input.Value
+	}
+	mapping, err := model.ParseTokenModelMapping(raw)
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgTokenModelMappingInvalid, map[string]any{"Error": err.Error()})
+		return false
+	}
+	if err := token.SetModelMapping(mapping); err != nil {
 		common.ApiError(c, err)
 		return false
 	}
@@ -323,6 +363,9 @@ func AddToken(c *gin.Context) {
 		token.CrossGroupRetry = false
 		_ = token.SetAutoGroups(nil)
 	}
+	if !setTokenModelMapping(c, &token, request.ModelMapping) {
+		return
+	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
@@ -340,6 +383,7 @@ func AddToken(c *gin.Context) {
 		UnlimitedQuota:     token.UnlimitedQuota,
 		ModelLimitsEnabled: token.ModelLimitsEnabled,
 		ModelLimits:        token.ModelLimits,
+		ModelMapping:       token.ModelMapping,
 		AllowIps:           token.AllowIps,
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
@@ -439,6 +483,9 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.AllowIps = token.AllowIps
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
+		if !setTokenModelMapping(c, cleanToken, request.ModelMapping) {
+			return
+		}
 		if token.Group != "auto" {
 			cleanToken.CrossGroupRetry = false
 			_ = cleanToken.SetAutoGroups(nil)
@@ -468,6 +515,7 @@ func UpdateToken(c *gin.Context) {
 			{"unlimited_quota", previous.UnlimitedQuota != cleanToken.UnlimitedQuota},
 			{"model_limits_enabled", previous.ModelLimitsEnabled != cleanToken.ModelLimitsEnabled},
 			{"model_limits", previous.ModelLimits != cleanToken.ModelLimits},
+			{"model_mapping", previous.GetModelMapping() != cleanToken.GetModelMapping()},
 			{"allow_ips", (previous.AllowIps == nil) != (cleanToken.AllowIps == nil) ||
 				(previous.AllowIps != nil && cleanToken.AllowIps != nil && *previous.AllowIps != *cleanToken.AllowIps)},
 			{"group", previous.Group != cleanToken.Group},

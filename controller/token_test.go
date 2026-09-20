@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
@@ -49,8 +50,9 @@ type tokenKeyResponse struct {
 }
 
 type sqliteColumnInfo struct {
-	Name string `gorm:"column:name"`
-	Type string `gorm:"column:type"`
+	Name    string `gorm:"column:name"`
+	Type    string `gorm:"column:type"`
+	NotNull int    `gorm:"column:notnull"`
 }
 
 type legacyToken struct {
@@ -307,6 +309,46 @@ func getTokenAutoGroupsColumnType(t *testing.T, db *gorm.DB, dialect string) str
 	}
 }
 
+func getTokenModelMappingColumn(t *testing.T, db *gorm.DB, dialect string) (string, bool) {
+	t.Helper()
+
+	switch dialect {
+	case "sqlite":
+		var columns []sqliteColumnInfo
+		if err := db.Raw("PRAGMA table_info(tokens)").Scan(&columns).Error; err != nil {
+			t.Fatalf("failed to inspect sqlite tokens schema: %v", err)
+		}
+		for _, column := range columns {
+			if column.Name == "model_mapping" {
+				return strings.ToLower(column.Type), column.NotNull == 0
+			}
+		}
+		t.Fatalf("column model_mapping not found in tokens schema")
+		return "", false
+	case "mysql":
+		var dataType string
+		var isNullable string
+		if err := db.Raw(`SELECT DATA_TYPE, IS_NULLABLE FROM information_schema.columns
+			WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+			"tokens", "model_mapping").Row().Scan(&dataType, &isNullable); err != nil {
+			t.Fatalf("failed to inspect mysql token model_mapping column: %v", err)
+		}
+		return strings.ToLower(dataType), strings.EqualFold(isNullable, "YES")
+	case "postgres":
+		var dataType string
+		var isNullable string
+		if err := db.Raw(`SELECT data_type, is_nullable FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`,
+			"tokens", "model_mapping").Row().Scan(&dataType, &isNullable); err != nil {
+			t.Fatalf("failed to inspect postgres token model_mapping column: %v", err)
+		}
+		return strings.ToLower(dataType), strings.EqualFold(isNullable, "YES")
+	default:
+		t.Fatalf("unsupported dialect %q", dialect)
+		return "", false
+	}
+}
+
 func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect string, managedTokensTable *bool) {
 	t.Helper()
 
@@ -354,6 +396,12 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 	if got := getTokenAutoGroupsColumnType(t, db, dialect); got != "text" {
 		t.Fatalf("expected migrated auto_groups column type text, got %q", got)
 	}
+	if !db.Migrator().HasColumn(&model.Token{}, "model_mapping") {
+		t.Fatal("expected migration to add model_mapping column")
+	}
+	if columnType, nullable := getTokenModelMappingColumn(t, db, dialect); columnType != "text" || !nullable {
+		t.Fatalf("expected migrated model_mapping column to be nullable text, got type %q nullable %v", columnType, nullable)
+	}
 
 	var migratedToken model.Token
 	if err := db.First(&migratedToken, "name = ?", "legacy-token").Error; err != nil {
@@ -368,7 +416,11 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 	if migratedToken.AutoGroups != "" {
 		t.Fatalf("expected legacy token to inherit global Auto groups, got %q", migratedToken.AutoGroups)
 	}
+	if migratedToken.ModelMapping != nil {
+		t.Fatalf("expected legacy token model mapping to stay NULL, got %q", *migratedToken.ModelMapping)
+	}
 
+	modelMapping := `{"claude-opus-4-8":"dsv4f"}`
 	inserted := model.Token{
 		UserId:             8,
 		Name:               "long-token",
@@ -381,6 +433,7 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 		UnlimitedQuota:     true,
 		ModelLimitsEnabled: false,
 		ModelLimits:        "",
+		ModelMapping:       common.GetPointer(modelMapping),
 		AllowIps:           common.GetPointer(""),
 		UsedQuota:          0,
 		Group:              "default",
@@ -396,6 +449,9 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 	}
 	if fetched.Key != longKey {
 		t.Fatalf("expected long token key %q, got %q", longKey, fetched.Key)
+	}
+	if fetched.ModelMapping == nil || *fetched.ModelMapping != modelMapping {
+		t.Fatalf("expected long token model mapping %q, got %v", modelMapping, fetched.ModelMapping)
 	}
 }
 
@@ -583,6 +639,199 @@ func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 	if strings.Contains(unauthorizedRecorder.Body.String(), token.Key) {
 		t.Fatalf("unauthorized key response leaked raw token key: %s", unauthorizedRecorder.Body.String())
 	}
+}
+
+func tokenUpdatedFields(t *testing.T, ctx *gin.Context) []string {
+	t.Helper()
+
+	fields, ok := tokenAuditParams(ctx)["changed_fields"].([]string)
+	require.True(t, ok, "expected token update to record changed_fields")
+	return fields
+}
+
+func TestAddTokenModelMappingValidation(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	invalidMessagePrefix := i18n.Translate(i18n.LangEn, i18n.MsgTokenModelMappingInvalid, map[string]any{"Error": ""})
+
+	tests := []struct {
+		name          string
+		includeField  bool
+		value         any
+		wantStored    *string
+		wantErrorPart string
+		wantBindError bool
+	}{
+		{name: "normalized", includeField: true, value: `{"claude-opus-4-8":"dsv4f"," b ":" c "}`, wantStored: common.GetPointer(`{"b":"c","claude-opus-4-8":"dsv4f"}`)},
+		{name: "omitted"},
+		{name: "null", includeField: true, value: nil},
+		{name: "empty string", includeField: true, value: ""},
+		{name: "empty object", includeField: true, value: `{}`},
+		{name: "array document", includeField: true, value: `[1]`, wantErrorPart: "must be a JSON object"},
+		{name: "non string target", includeField: true, value: `{"a":1}`, wantErrorPart: "must be a string"},
+		{name: "empty target", includeField: true, value: `{"a":""}`, wantErrorPart: "must not be empty"},
+		{name: "cycle", includeField: true, value: `{"a":"b","b":"a"}`, wantErrorPart: "cycle"},
+		{name: "name too long", includeField: true, value: fmt.Sprintf(`{%q:"dsv4f"}`, strings.Repeat("m", 257)), wantErrorPart: "exceeds 256 characters"},
+		{name: "non string document", includeField: true, value: 123, wantBindError: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setupTokenControllerTestDB(t)
+			request := map[string]any{
+				"name":            "mapping-" + test.name,
+				"expired_time":    -1,
+				"remain_quota":    0,
+				"unlimited_quota": true,
+				"group":           "",
+			}
+			if test.includeField {
+				request["model_mapping"] = test.value
+			}
+
+			ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", request, 1)
+			AddToken(ctx)
+			response := decodeAPIResponse(t, recorder)
+
+			switch {
+			case test.wantBindError:
+				require.False(t, response.Success)
+				assert.Contains(t, response.Message, "model_mapping")
+			case test.wantErrorPart != "":
+				require.False(t, response.Success, response.Message)
+				assert.Contains(t, response.Message, invalidMessagePrefix)
+				assert.Contains(t, response.Message, test.wantErrorPart)
+			default:
+				require.True(t, response.Success, response.Message)
+			}
+
+			var token model.Token
+			err := model.DB.Where("name = ?", request["name"]).First(&token).Error
+			if test.wantErrorPart != "" || test.wantBindError {
+				assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+				return
+			}
+			require.NoError(t, err)
+			if test.wantStored == nil {
+				assert.Nil(t, token.ModelMapping)
+				return
+			}
+			require.NotNil(t, token.ModelMapping)
+			assert.Equal(t, *test.wantStored, *token.ModelMapping)
+		})
+	}
+}
+
+func TestUpdateTokenModelMappingTriState(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "mapping-token", "mapping-token-key")
+	require.NoError(t, token.SetModelMapping(map[string]string{"a": "b"}))
+	require.NoError(t, db.Save(token).Error)
+
+	normalized := `{"b":"c","claude-opus-4-8":"dsv4f"}`
+	updateBody := func() map[string]any {
+		return map[string]any{
+			"id":                   token.Id,
+			"name":                 "mapping-token",
+			"expired_time":         -1,
+			"remain_quota":         100,
+			"unlimited_quota":      true,
+			"model_limits_enabled": false,
+			"model_limits":         "",
+			"group":                "default",
+			"cross_group_retry":    false,
+		}
+	}
+	put := func(t *testing.T, target string, body map[string]any) (*gin.Context, tokenAPIResponse) {
+		t.Helper()
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, target, body, 1)
+		UpdateToken(ctx)
+		return ctx, decodeAPIResponse(t, recorder)
+	}
+	storedMapping := func(t *testing.T) *string {
+		t.Helper()
+		var stored model.Token
+		require.NoError(t, db.First(&stored, token.Id).Error)
+		return stored.ModelMapping
+	}
+
+	t.Run("omitted field preserves stored mapping", func(t *testing.T) {
+		ctx, response := put(t, "/api/token/", updateBody())
+		require.True(t, response.Success, response.Message)
+		stored := storedMapping(t)
+		require.NotNil(t, stored)
+		assert.Equal(t, `{"a":"b"}`, *stored)
+		assert.NotContains(t, tokenUpdatedFields(t, ctx), "model_mapping")
+	})
+
+	t.Run("null clears stored mapping and records the change", func(t *testing.T) {
+		body := updateBody()
+		body["model_mapping"] = nil
+		ctx, response := put(t, "/api/token/", body)
+		require.True(t, response.Success, response.Message)
+		assert.Nil(t, storedMapping(t))
+		assert.Contains(t, tokenUpdatedFields(t, ctx), "model_mapping")
+		params, err := common.Marshal(tokenAuditParams(ctx))
+		require.NoError(t, err)
+		assert.NotContains(t, string(params), `{"a":"b"}`)
+	})
+
+	t.Run("new mapping replaces stored mapping", func(t *testing.T) {
+		body := updateBody()
+		body["model_mapping"] = `{"claude-opus-4-8":"dsv4f"}`
+		ctx, response := put(t, "/api/token/", body)
+		require.True(t, response.Success, response.Message)
+		stored := storedMapping(t)
+		require.NotNil(t, stored)
+		assert.Equal(t, `{"claude-opus-4-8":"dsv4f"}`, *stored)
+		assert.Contains(t, tokenUpdatedFields(t, ctx), "model_mapping")
+	})
+
+	t.Run("cycle is rejected without changing the stored mapping", func(t *testing.T) {
+		body := updateBody()
+		body["model_mapping"] = `{"a":"b","b":"a"}`
+		_, response := put(t, "/api/token/", body)
+		require.False(t, response.Success)
+		assert.Contains(t, response.Message, i18n.Translate(i18n.LangEn, i18n.MsgTokenModelMappingInvalid, map[string]any{"Error": ""}))
+		assert.Contains(t, response.Message, "cycle")
+		stored := storedMapping(t)
+		require.NotNil(t, stored)
+		assert.Equal(t, `{"claude-opus-4-8":"dsv4f"}`, *stored)
+	})
+
+	t.Run("status only update leaves the mapping untouched", func(t *testing.T) {
+		_, response := put(t, "/api/token/?status_only=true", map[string]any{"id": token.Id, "status": common.TokenStatusDisabled})
+		require.True(t, response.Success, response.Message)
+		var stored model.Token
+		require.NoError(t, db.First(&stored, token.Id).Error)
+		assert.Equal(t, common.TokenStatusDisabled, stored.Status)
+		require.NotNil(t, stored.ModelMapping)
+		assert.Equal(t, `{"claude-opus-4-8":"dsv4f"}`, *stored.ModelMapping)
+	})
+
+	t.Run("update and detail responses echo the normalized mapping", func(t *testing.T) {
+		body := updateBody()
+		body["model_mapping"] = `{" b ":" c ","claude-opus-4-8":"dsv4f"}`
+		_, response := put(t, "/api/token/", body)
+		require.True(t, response.Success, response.Message)
+		assertResponseMapping := func(t *testing.T, data json.RawMessage) {
+			t.Helper()
+			var detail struct {
+				ModelMapping *string `json:"model_mapping"`
+			}
+			require.NoError(t, common.Unmarshal(data, &detail))
+			require.NotNil(t, detail.ModelMapping)
+			assert.Equal(t, normalized, *detail.ModelMapping)
+		}
+		assertResponseMapping(t, response.Data)
+
+		getCtx, getRecorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
+		getCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+		GetToken(getCtx)
+		getResponse := decodeAPIResponse(t, getRecorder)
+		require.True(t, getResponse.Success, getResponse.Message)
+		assertResponseMapping(t, getResponse.Data)
+	})
 }
 
 func TestAPITokenAuditDatabaseMatrix(t *testing.T) {
