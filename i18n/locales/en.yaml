@@ -54,6 +54,10 @@ token.auto_groups_too_many: "A token can select at most {{.Max}} Auto groups"
 token.auto_groups_duplicate: "Auto group {{.Group}} is duplicated"
 token.auto_groups_invalid: "Auto group {{.Group}} is unavailable or unauthorized"
 token.model_mapping_invalid: "Invalid model redirect configuration: {{.Error}}"
+token.profiles_invalid: "Invalid routing profile configuration: {{.Error}}"
+token.profiles_require_auto_group: "Route presets require the token group to be auto"
+token.profile_not_found: "Routing profile {{.Name}} is not configured"
+token.route_preset_not_found: "Route preset {{.Name}} is not configured in profile {{.Profile}}"
 
 # Redemption messages
 redemption.name_length: "Redemption code name length must be between 1-20"

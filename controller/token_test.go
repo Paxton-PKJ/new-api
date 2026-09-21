@@ -15,10 +15,13 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -841,6 +844,415 @@ func TestUpdateTokenModelMappingTriState(t *testing.T) {
 		getResponse := decodeAPIResponse(t, getRecorder)
 		require.True(t, getResponse.Success, getResponse.Message)
 		assertResponseMapping(t, getResponse.Data)
+	})
+}
+
+// setupTokenProfilesTestGroups 准备路由预设校验依赖的分组配置：用户可选分组与分组倍率，
+// 并把每个令牌的自动分组上限收紧到 2 以便覆盖超限分支。
+func setupTokenProfilesTestGroups(t *testing.T) {
+	t.Helper()
+
+	originalMax := setting.GetMaxTokenAutoGroups()
+	originalUsableGroups := setting.UserUsableGroups2JSONString()
+	originalRatios := ratio_setting.GroupRatio2JSONString()
+	require.NoError(t, setting.UpdateMaxTokenAutoGroups("2"))
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","fengwind":"F","agent":"A","qq":"Q"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"fengwind":1,"agent":1,"qq":1}`))
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateMaxTokenAutoGroups(strconv.Itoa(originalMax)))
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(originalUsableGroups))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(originalRatios))
+	})
+}
+
+func TestAddTokenProfilesValidation(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	invalidMessagePrefix := i18n.Translate(i18n.LangEn, i18n.MsgTokenProfilesInvalid, map[string]any{"Error": ""})
+	requireAutoGroupMessage := i18n.Translate(i18n.LangEn, i18n.MsgTokenProfilesRequireAutoGroup)
+	setupTokenProfilesTestGroups(t)
+
+	fullDocument := `{
+		"active_profile": " dsv4f ",
+		"profiles": [
+			{
+				"name": " dsv4f ",
+				"model_mapping": {"claude-opus-4-8": "dsv4f"},
+				"model_limits": [" gpt-4o ", "claude-sonnet-5"],
+				"route_presets": [
+					{"name": " normal ", "auto_groups": [" fengwind ", "agent"]},
+					{"name": "agent-first", "auto_groups": ["agent"], "cross_group_retry": true}
+				]
+			},
+			{"name": "f5.1"}
+		]
+	}`
+	normalizedDocument := &model.TokenProfileConfig{
+		ActiveProfile: "dsv4f",
+		Profiles: []model.TokenProfile{
+			{
+				Name:         "dsv4f",
+				ModelMapping: map[string]string{"claude-opus-4-8": "dsv4f"},
+				ModelLimits:  []string{"gpt-4o", "claude-sonnet-5"},
+				RoutePresets: []model.TokenRoutePreset{
+					{Name: "normal", AutoGroups: []string{"fengwind", "agent"}},
+					{Name: "agent-first", AutoGroups: []string{"agent"}, CrossGroupRetry: true},
+				},
+			},
+			{Name: "f5.1"},
+		},
+	}
+	mappingOnlyDocument := &model.TokenProfileConfig{
+		Profiles: []model.TokenProfile{
+			{Name: "p", ModelMapping: map[string]string{"a": "b"}, ModelLimits: []string{"gpt-4o"}},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		group         string
+		includeField  bool
+		value         json.RawMessage
+		wantStored    *model.TokenProfileConfig
+		wantErrorPart string
+		wantMessage   string
+	}{
+		{name: "normalized document", group: "auto", includeField: true, value: json.RawMessage(fullDocument), wantStored: normalizedDocument},
+		{name: "omitted", group: "auto"},
+		{name: "null", group: "auto", includeField: true},
+		{name: "empty object", group: "auto", includeField: true, value: json.RawMessage(`{}`)},
+		{name: "empty profiles", group: "auto", includeField: true, value: json.RawMessage(`{"profiles":[]}`)},
+		{name: "array document", group: "auto", includeField: true, value: json.RawMessage(`[1]`), wantErrorPart: "must be a JSON object"},
+		{name: "non object document", group: "auto", includeField: true, value: json.RawMessage(`123`), wantErrorPart: "must be a JSON object"},
+		{
+			name: "unselectable auto group", group: "auto", includeField: true,
+			value:         json.RawMessage(`{"profiles":[{"name":"p","route_presets":[{"name":"normal","auto_groups":["vip"]}]}]}`),
+			wantErrorPart: `auto group "vip" is unavailable or unauthorized`,
+		},
+		{
+			name: "too many auto groups", group: "auto", includeField: true,
+			value:         json.RawMessage(`{"profiles":[{"name":"p","route_presets":[{"name":"normal","auto_groups":["default","fengwind","agent"]}]}]}`),
+			wantErrorPart: "selects more than 2 auto groups",
+		},
+		{
+			name: "presets require auto group", group: "default", includeField: true,
+			value:       json.RawMessage(`{"profiles":[{"name":"p","route_presets":[{"name":"normal","auto_groups":["fengwind"]}]}]}`),
+			wantMessage: requireAutoGroupMessage,
+		},
+		{
+			name: "fixed group without presets", group: "default", includeField: true,
+			value:      json.RawMessage(`{"profiles":[{"name":"p","model_mapping":{"a":"b"},"model_limits":["gpt-4o"]}]}`),
+			wantStored: mappingOnlyDocument,
+		},
+		{
+			name: "mapping cycle", group: "auto", includeField: true,
+			value:         json.RawMessage(`{"profiles":[{"name":"dsv4f","model_mapping":{"a":"b","b":"a"}}]}`),
+			wantErrorPart: `profile "dsv4f": token model mapping contains a cycle`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setupTokenControllerTestDB(t)
+			request := map[string]any{
+				"name":            "profiles-" + test.name,
+				"expired_time":    -1,
+				"remain_quota":    0,
+				"unlimited_quota": true,
+				"group":           test.group,
+			}
+			if test.includeField {
+				request["profiles"] = test.value
+			}
+
+			ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", request, 1)
+			common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+			AddToken(ctx)
+			response := decodeAPIResponse(t, recorder)
+
+			switch {
+			case test.wantMessage != "":
+				require.False(t, response.Success)
+				assert.Equal(t, test.wantMessage, response.Message)
+			case test.wantErrorPart != "":
+				require.False(t, response.Success, response.Message)
+				assert.Contains(t, response.Message, invalidMessagePrefix)
+				assert.Contains(t, response.Message, test.wantErrorPart)
+			default:
+				require.True(t, response.Success, response.Message)
+			}
+
+			var token model.Token
+			err := model.DB.Where("name = ?", request["name"]).First(&token).Error
+			if test.wantMessage != "" || test.wantErrorPart != "" {
+				assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+				return
+			}
+			require.NoError(t, err)
+			assert.Nil(t, token.ModelMapping)
+			if test.wantStored == nil {
+				assert.Nil(t, token.Profiles)
+				return
+			}
+			expected, err := common.Marshal(test.wantStored)
+			require.NoError(t, err)
+			require.NotNil(t, token.Profiles)
+			assert.Equal(t, string(expected), *token.Profiles)
+		})
+	}
+}
+
+func TestUpdateTokenProfilesTriStateAndSwitch(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	setupTokenProfilesTestGroups(t)
+	db := setupTokenControllerTestDB(t)
+
+	token := seedToken(t, db, 1, "profiles-token", "profiles-token-key")
+	token.Group = "auto"
+	require.NoError(t, token.SetProfileConfig(&model.TokenProfileConfig{
+		ActiveProfile: "dsv4f",
+		Profiles: []model.TokenProfile{
+			{
+				Name:         "dsv4f",
+				ModelMapping: map[string]string{"claude-opus-4-8": "dsv4f"},
+				RoutePresets: []model.TokenRoutePreset{
+					{Name: "normal", AutoGroups: []string{"fengwind", "agent"}},
+					{Name: "agent-first", AutoGroups: []string{"agent"}, CrossGroupRetry: true},
+				},
+				ActiveRoutePreset: "normal",
+			},
+			{Name: "f5.1"},
+		},
+	}))
+	require.NoError(t, db.Save(token).Error)
+	require.NotNil(t, token.Profiles)
+	storedDocument := *token.Profiles
+
+	plainToken := seedToken(t, db, 1, "plain-token", "plain-token-key")
+
+	updateBody := func() map[string]any {
+		return map[string]any{
+			"id":                   token.Id,
+			"name":                 "profiles-token",
+			"expired_time":         -1,
+			"remain_quota":         100,
+			"unlimited_quota":      true,
+			"model_limits_enabled": false,
+			"model_limits":         "",
+			"group":                "auto",
+			"cross_group_retry":    false,
+		}
+	}
+	put := func(t *testing.T, target string, body map[string]any) (*gin.Context, tokenAPIResponse) {
+		t.Helper()
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, target, body, 1)
+		common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+		UpdateToken(ctx)
+		return ctx, decodeAPIResponse(t, recorder)
+	}
+	storedToken := func(t *testing.T) model.Token {
+		t.Helper()
+		var stored model.Token
+		require.NoError(t, db.First(&stored, token.Id).Error)
+		return stored
+	}
+
+	t.Run("omitted field preserves the stored document", func(t *testing.T) {
+		ctx, response := put(t, "/api/token/", updateBody())
+		require.True(t, response.Success, response.Message)
+		stored := storedToken(t)
+		require.NotNil(t, stored.Profiles)
+		assert.Equal(t, storedDocument, *stored.Profiles)
+		assert.NotContains(t, tokenUpdatedFields(t, ctx), "profiles")
+	})
+
+	t.Run("null clears the stored document and records the change", func(t *testing.T) {
+		body := updateBody()
+		body["profiles"] = nil
+		ctx, response := put(t, "/api/token/", body)
+		require.True(t, response.Success, response.Message)
+		assert.Nil(t, storedToken(t).Profiles)
+		assert.Contains(t, tokenUpdatedFields(t, ctx), "profiles")
+		params, err := common.Marshal(tokenAuditParams(ctx))
+		require.NoError(t, err)
+		assert.NotContains(t, string(params), "dsv4f")
+	})
+
+	t.Run("new document replaces the stored document", func(t *testing.T) {
+		body := updateBody()
+		body["profiles"] = map[string]any{
+			"active_profile": "dsv4f",
+			"profiles": []any{
+				map[string]any{
+					"name":                "dsv4f",
+					"model_mapping":       map[string]string{"claude-opus-4-8": "dsv4f"},
+					"active_route_preset": "normal",
+					"route_presets": []any{
+						map[string]any{"name": "normal", "auto_groups": []string{"fengwind", "agent"}},
+						map[string]any{"name": "agent-first", "auto_groups": []string{"agent"}, "cross_group_retry": true},
+					},
+				},
+				map[string]any{"name": "f5.1"},
+			},
+		}
+		ctx, response := put(t, "/api/token/", body)
+		require.True(t, response.Success, response.Message)
+		assert.Contains(t, tokenUpdatedFields(t, ctx), "profiles")
+
+		var detail struct {
+			Profiles *model.TokenProfileConfig `json:"profiles"`
+		}
+		require.NoError(t, common.Unmarshal(response.Data, &detail))
+		require.NotNil(t, detail.Profiles)
+		require.Len(t, detail.Profiles.Profiles, 2)
+		assert.Equal(t, "dsv4f", detail.Profiles.ActiveProfile)
+		require.Len(t, detail.Profiles.Profiles[0].RoutePresets, 2)
+		assert.Equal(t, []string{"fengwind", "agent"}, detail.Profiles.Profiles[0].RoutePresets[0].AutoGroups)
+		assert.Equal(t, "normal", detail.Profiles.Profiles[0].ActiveRoutePreset)
+
+		stored := storedToken(t)
+		require.NotNil(t, stored.Profiles)
+		storedDocument = *stored.Profiles
+		config, err := model.ParseTokenProfiles(storedDocument)
+		require.NoError(t, err)
+		require.NotNil(t, config)
+		assert.Equal(t, "dsv4f", config.ActiveProfile)
+	})
+
+	t.Run("invalid document is rejected without changing the stored document", func(t *testing.T) {
+		body := updateBody()
+		body["profiles"] = json.RawMessage(`{"profiles":[{"name":"p","route_presets":[{"name":"normal","auto_groups":["vip"]}]}]}`)
+		_, response := put(t, "/api/token/", body)
+		require.False(t, response.Success)
+		assert.Contains(t, response.Message, i18n.Translate(i18n.LangEn, i18n.MsgTokenProfilesInvalid, map[string]any{"Error": ""}))
+		assert.Contains(t, response.Message, `auto group "vip" is unavailable or unauthorized`)
+		stored := storedToken(t)
+		require.NotNil(t, stored.Profiles)
+		assert.Equal(t, storedDocument, *stored.Profiles)
+	})
+
+	t.Run("profile only switch activates another profile without touching other fields", func(t *testing.T) {
+		before := storedToken(t)
+		ctx, response := put(t, "/api/token/?profile_only=true", map[string]any{"id": token.Id, "active_profile": "f5.1"})
+		require.True(t, response.Success, response.Message)
+
+		after := storedToken(t)
+		assert.Equal(t, before.Name, after.Name)
+		assert.Equal(t, before.Group, after.Group)
+		assert.Equal(t, before.AutoGroups, after.AutoGroups)
+		assert.Equal(t, before.ModelMapping, after.ModelMapping)
+		require.NotNil(t, after.Profiles)
+		config, err := model.ParseTokenProfiles(*after.Profiles)
+		require.NoError(t, err)
+		require.NotNil(t, config)
+		assert.Equal(t, "f5.1", config.ActiveProfile)
+		require.Len(t, config.Profiles, 2)
+		assert.Equal(t, "normal", config.Profiles[0].ActiveRoutePreset)
+
+		params := tokenAuditParams(ctx)
+		assert.Equal(t, "dsv4f", params["from_profile"])
+		assert.Equal(t, "f5.1", params["to_profile"])
+		assert.Equal(t, "normal", params["from_route_preset"])
+		assert.Equal(t, "", params["to_route_preset"])
+		storedDocument = *after.Profiles
+	})
+
+	t.Run("profile only switch updates profile and route preset together", func(t *testing.T) {
+		ctx, response := put(t, "/api/token/?profile_only=true", map[string]any{
+			"id":                  token.Id,
+			"active_profile":      "dsv4f",
+			"active_route_preset": "agent-first",
+		})
+		require.True(t, response.Success, response.Message)
+
+		after := storedToken(t)
+		require.NotNil(t, after.Profiles)
+		config, err := model.ParseTokenProfiles(*after.Profiles)
+		require.NoError(t, err)
+		require.NotNil(t, config)
+		assert.Equal(t, "dsv4f", config.ActiveProfile)
+		require.Len(t, config.Profiles, 2)
+		assert.Equal(t, "agent-first", config.Profiles[0].ActiveRoutePreset)
+		assert.Equal(t, "dsv4f", config.Profiles[0].ModelMapping["claude-opus-4-8"])
+
+		params := tokenAuditParams(ctx)
+		assert.Equal(t, "f5.1", params["from_profile"])
+		assert.Equal(t, "", params["from_route_preset"])
+		assert.Equal(t, "dsv4f", params["to_profile"])
+		assert.Equal(t, "agent-first", params["to_route_preset"])
+		storedDocument = *after.Profiles
+	})
+
+	t.Run("profile only switch rejects an unknown route preset", func(t *testing.T) {
+		_, response := put(t, "/api/token/?profile_only=true", map[string]any{"id": token.Id, "active_route_preset": "nope"})
+		require.False(t, response.Success)
+		assert.Equal(t, i18n.Translate(i18n.LangEn, i18n.MsgTokenRoutePresetNotFound, map[string]any{"Name": "nope", "Profile": "dsv4f"}), response.Message)
+		stored := storedToken(t)
+		require.NotNil(t, stored.Profiles)
+		assert.Equal(t, storedDocument, *stored.Profiles)
+	})
+
+	t.Run("profile only switch rejects an unknown profile", func(t *testing.T) {
+		_, response := put(t, "/api/token/?profile_only=true", map[string]any{"id": token.Id, "active_profile": "nope"})
+		require.False(t, response.Success)
+		assert.Equal(t, i18n.Translate(i18n.LangEn, i18n.MsgTokenProfileNotFound, map[string]any{"Name": "nope"}), response.Message)
+	})
+
+	t.Run("empty active profile disables overlay and keeps the other profiles", func(t *testing.T) {
+		ctx, response := put(t, "/api/token/?profile_only=true", map[string]any{"id": token.Id, "active_profile": ""})
+		require.True(t, response.Success, response.Message)
+		assert.Equal(t, "dsv4f", tokenAuditParams(ctx)["from_profile"])
+		assert.Equal(t, "", tokenAuditParams(ctx)["to_profile"])
+
+		stored := storedToken(t)
+		require.NotNil(t, stored.Profiles)
+		config, err := model.ParseTokenProfiles(*stored.Profiles)
+		require.NoError(t, err)
+		require.NotNil(t, config)
+		assert.Equal(t, "", config.ActiveProfile)
+		require.Len(t, config.Profiles, 2)
+		assert.Equal(t, "agent-first", config.Profiles[0].ActiveRoutePreset)
+		assert.Equal(t, "dsv4f", config.Profiles[0].ModelMapping["claude-opus-4-8"])
+		storedDocument = *stored.Profiles
+	})
+
+	t.Run("profile only switch requires a configured document", func(t *testing.T) {
+		_, response := put(t, "/api/token/?profile_only=true", map[string]any{"id": plainToken.Id, "active_profile": "dsv4f"})
+		require.False(t, response.Success)
+		assert.Equal(t, i18n.Translate(i18n.LangEn, i18n.MsgTokenProfileNotFound, map[string]any{"Name": "dsv4f"}), response.Message)
+	})
+
+	t.Run("profile only switch without selection fields is a no-op", func(t *testing.T) {
+		_, response := put(t, "/api/token/?profile_only=true", map[string]any{"id": token.Id})
+		require.True(t, response.Success, response.Message)
+		stored := storedToken(t)
+		require.NotNil(t, stored.Profiles)
+		assert.Equal(t, storedDocument, *stored.Profiles)
+	})
+
+	t.Run("status only update leaves the profiles untouched", func(t *testing.T) {
+		_, response := put(t, "/api/token/?status_only=true", map[string]any{"id": token.Id, "status": common.TokenStatusDisabled})
+		require.True(t, response.Success, response.Message)
+		stored := storedToken(t)
+		assert.Equal(t, common.TokenStatusDisabled, stored.Status)
+		require.NotNil(t, stored.Profiles)
+		assert.Equal(t, storedDocument, *stored.Profiles)
+	})
+
+	t.Run("detail response exposes a typed profiles document", func(t *testing.T) {
+		ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
+		ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+		GetToken(ctx)
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		var detail struct {
+			Profiles *model.TokenProfileConfig `json:"profiles"`
+		}
+		require.NoError(t, common.Unmarshal(response.Data, &detail))
+		require.NotNil(t, detail.Profiles)
+		require.Len(t, detail.Profiles.Profiles, 2)
+		assert.Equal(t, "f5.1", detail.Profiles.Profiles[1].Name)
+		assert.Equal(t, map[string]string{"claude-opus-4-8": "dsv4f"}, detail.Profiles.Profiles[0].ModelMapping)
 	})
 }
 

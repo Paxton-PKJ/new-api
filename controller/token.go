@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -51,15 +53,34 @@ func (input *tokenModelMappingInput) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type tokenProfilesInput struct {
+	Set   bool
+	Value json.RawMessage
+}
+
+func (input *tokenProfilesInput) UnmarshalJSON(data []byte) error {
+	input.Set = true
+	if strings.TrimSpace(string(data)) == "null" {
+		input.Value = nil
+		return nil
+	}
+	input.Value = append(json.RawMessage(nil), data...)
+	return nil
+}
+
 type tokenRequest struct {
 	model.Token
-	AutoGroups   tokenAutoGroupsInput   `json:"auto_groups"`
-	ModelMapping tokenModelMappingInput `json:"model_mapping"`
+	AutoGroups        tokenAutoGroupsInput   `json:"auto_groups"`
+	ModelMapping      tokenModelMappingInput `json:"model_mapping"`
+	Profiles          tokenProfilesInput     `json:"profiles"`
+	ActiveProfile     *string                `json:"active_profile"`
+	ActiveRoutePreset *string                `json:"active_route_preset"`
 }
 
 type tokenResponse struct {
 	*model.Token
-	AutoGroups []string `json:"auto_groups"`
+	AutoGroups []string                  `json:"auto_groups"`
+	Profiles   *model.TokenProfileConfig `json:"profiles"`
 }
 
 func maxTokenQuota() int {
@@ -86,7 +107,7 @@ func buildMaskedTokenResponse(token *model.Token) *tokenResponse {
 	if len(autoGroups) == 0 {
 		autoGroups = nil
 	}
-	return &tokenResponse{Token: &maskedToken, AutoGroups: autoGroups}
+	return &tokenResponse{Token: &maskedToken, AutoGroups: autoGroups, Profiles: token.GetProfileConfig()}
 }
 
 func buildMaskedTokenResponses(tokens []*model.Token) []*tokenResponse {
@@ -165,6 +186,138 @@ func setTokenModelMapping(c *gin.Context, token *model.Token, input tokenModelMa
 		return false
 	}
 	return true
+}
+
+// setTokenProfiles 应用 profiles 三态输入：字段缺省时保留，null 清空，有值时严格校验后整体替换。
+// 文档校验由 model.ParseTokenProfiles 完成，这里补上依赖请求上下文的三条规则：
+// 路由预设的分组数量上限、分组是否在当前用户可选范围内、以及带预设的配置档只允许用于 auto 分组令牌。
+func setTokenProfiles(c *gin.Context, token *model.Token, input tokenProfilesInput) bool {
+	if !input.Set {
+		return true
+	}
+	var config *model.TokenProfileConfig
+	if input.Value != nil {
+		parsed, err := model.ParseTokenProfiles(string(input.Value))
+		if err != nil {
+			common.ApiErrorI18n(c, i18n.MsgTokenProfilesInvalid, map[string]any{"Error": err.Error()})
+			return false
+		}
+		config = parsed
+	}
+	if config != nil {
+		maxAutoGroups := setting.GetMaxTokenAutoGroups()
+		hasRoutePresets := false
+		for _, profile := range config.Profiles {
+			for _, preset := range profile.RoutePresets {
+				hasRoutePresets = true
+				if len(preset.AutoGroups) > maxAutoGroups {
+					common.ApiErrorI18n(c, i18n.MsgTokenProfilesInvalid, map[string]any{
+						"Error": fmt.Sprintf("profile %q: route preset %q selects more than %d auto groups", profile.Name, preset.Name, maxAutoGroups),
+					})
+					return false
+				}
+			}
+		}
+		if hasRoutePresets {
+			if token.Group != "auto" {
+				common.ApiErrorI18n(c, i18n.MsgTokenProfilesRequireAutoGroup)
+				return false
+			}
+			userGroup, err := getTokenRequestUserGroup(c)
+			if err != nil {
+				common.ApiError(c, err)
+				return false
+			}
+			for _, profile := range config.Profiles {
+				for _, preset := range profile.RoutePresets {
+					for _, group := range preset.AutoGroups {
+						if !service.IsUserSelectableGroup(userGroup, group) {
+							common.ApiErrorI18n(c, i18n.MsgTokenProfilesInvalid, map[string]any{
+								"Error": fmt.Sprintf("profile %q: route preset %q: auto group %q is unavailable or unauthorized", profile.Name, preset.Name, group),
+							})
+							return false
+						}
+					}
+				}
+			}
+		}
+	}
+	if err := token.SetProfileConfig(config); err != nil {
+		common.ApiError(c, err)
+		return false
+	}
+	return true
+}
+
+// applyTokenActiveProfile 处理 profile_only 快速切换：只改活动配置档与其活动路由预设，
+// 令牌其余字段保持数据库原值。两个字段都缺省时不修改任何内容。
+func applyTokenActiveProfile(c *gin.Context, token *model.Token, activeProfile, activeRoutePreset *string) bool {
+	if activeProfile == nil && activeRoutePreset == nil {
+		return true
+	}
+	config := token.GetProfileConfig()
+	if activeProfile != nil {
+		name := strings.TrimSpace(*activeProfile)
+		if name == "" {
+			if config != nil {
+				config.ActiveProfile = ""
+			}
+		} else {
+			index := -1
+			if config != nil {
+				index = slices.IndexFunc(config.Profiles, func(profile model.TokenProfile) bool { return profile.Name == name })
+			}
+			if index < 0 {
+				common.ApiErrorI18n(c, i18n.MsgTokenProfileNotFound, map[string]any{"Name": name})
+				return false
+			}
+			config.ActiveProfile = name
+		}
+	}
+	if activeRoutePreset != nil {
+		name := strings.TrimSpace(*activeRoutePreset)
+		activeName := ""
+		index := -1
+		if config != nil {
+			activeName = config.ActiveProfile
+			if activeName != "" {
+				index = slices.IndexFunc(config.Profiles, func(profile model.TokenProfile) bool { return profile.Name == activeName })
+			}
+		}
+		if index < 0 {
+			common.ApiErrorI18n(c, i18n.MsgTokenProfileNotFound, map[string]any{"Name": activeName})
+			return false
+		}
+		profile := &config.Profiles[index]
+		if name == "" {
+			profile.ActiveRoutePreset = ""
+		} else {
+			if !slices.ContainsFunc(profile.RoutePresets, func(preset model.TokenRoutePreset) bool { return preset.Name == name }) {
+				common.ApiErrorI18n(c, i18n.MsgTokenRoutePresetNotFound, map[string]any{"Name": name, "Profile": activeName})
+				return false
+			}
+			profile.ActiveRoutePreset = name
+		}
+	}
+	if err := token.SetProfileConfig(config); err != nil {
+		common.ApiError(c, err)
+		return false
+	}
+	return true
+}
+
+// activeProfileSelection 返回配置档文档中当前生效的配置档名与路由预设名，未配置或引用失效时为空串。
+func activeProfileSelection(config *model.TokenProfileConfig) (profileName, presetName string) {
+	if config == nil || config.ActiveProfile == "" {
+		return "", ""
+	}
+	index := slices.IndexFunc(config.Profiles, func(profile model.TokenProfile) bool {
+		return profile.Name == config.ActiveProfile
+	})
+	if index < 0 {
+		return config.ActiveProfile, ""
+	}
+	return config.ActiveProfile, config.Profiles[index].ActiveRoutePreset
 }
 
 func GetAllTokens(c *gin.Context) {
@@ -366,6 +519,9 @@ func AddToken(c *gin.Context) {
 	if !setTokenModelMapping(c, &token, request.ModelMapping) {
 		return
 	}
+	if !setTokenProfiles(c, &token, request.Profiles) {
+		return
+	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
@@ -384,6 +540,7 @@ func AddToken(c *gin.Context) {
 		ModelLimitsEnabled: token.ModelLimitsEnabled,
 		ModelLimits:        token.ModelLimits,
 		ModelMapping:       token.ModelMapping,
+		Profiles:           token.Profiles,
 		AllowIps:           token.AllowIps,
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
@@ -427,6 +584,7 @@ func DeleteToken(c *gin.Context) {
 func UpdateToken(c *gin.Context) {
 	userId := c.GetInt("id")
 	statusOnly := c.Query("status_only")
+	profileOnly := c.Query("profile_only")
 	request := tokenRequest{}
 	err := c.ShouldBindJSON(&request)
 	if err != nil {
@@ -470,8 +628,15 @@ func UpdateToken(c *gin.Context) {
 			return
 		}
 	}
+	skipWrite := false
 	if statusOnly != "" {
 		cleanToken.Status = token.Status
+	} else if profileOnly != "" {
+		if !applyTokenActiveProfile(c, cleanToken, request.ActiveProfile, request.ActiveRoutePreset) {
+			return
+		}
+		// 两个切换字段都缺省时请求是幂等的，不需要写库。
+		skipWrite = request.ActiveProfile == nil && request.ActiveRoutePreset == nil
 	} else {
 		// If you add more fields, please also update token.Update()
 		cleanToken.Name = token.Name
@@ -486,6 +651,9 @@ func UpdateToken(c *gin.Context) {
 		if !setTokenModelMapping(c, cleanToken, request.ModelMapping) {
 			return
 		}
+		if !setTokenProfiles(c, cleanToken, request.Profiles) {
+			return
+		}
 		if token.Group != "auto" {
 			cleanToken.CrossGroupRetry = false
 			_ = cleanToken.SetAutoGroups(nil)
@@ -495,14 +663,21 @@ func UpdateToken(c *gin.Context) {
 			}
 		}
 	}
-	err = cleanToken.Update()
-	if err != nil {
-		common.ApiError(c, err)
-		return
+	if !skipWrite {
+		err = cleanToken.Update()
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	params["name"] = cleanToken.Name
 	if statusOnly != "" {
 		params["from"], params["to"] = previous.Status, cleanToken.Status
+	} else if profileOnly != "" {
+		fromProfile, fromPreset := activeProfileSelection(previous.GetProfileConfig())
+		toProfile, toPreset := activeProfileSelection(cleanToken.GetProfileConfig())
+		params["from_profile"], params["from_route_preset"] = fromProfile, fromPreset
+		params["to_profile"], params["to_route_preset"] = toProfile, toPreset
 	} else {
 		changedFields := []string{}
 		for _, field := range []struct {
@@ -516,6 +691,7 @@ func UpdateToken(c *gin.Context) {
 			{"model_limits_enabled", previous.ModelLimitsEnabled != cleanToken.ModelLimitsEnabled},
 			{"model_limits", previous.ModelLimits != cleanToken.ModelLimits},
 			{"model_mapping", previous.GetModelMapping() != cleanToken.GetModelMapping()},
+			{"profiles", previous.GetProfiles() != cleanToken.GetProfiles()},
 			{"allow_ips", (previous.AllowIps == nil) != (cleanToken.AllowIps == nil) ||
 				(previous.AllowIps != nil && cleanToken.AllowIps != nil && *previous.AllowIps != *cleanToken.AllowIps)},
 			{"group", previous.Group != cleanToken.Group},

@@ -55,6 +55,10 @@ token.auto_groups_too_many: "每个令牌最多可选择 {{.Max}} 个 Auto 分�
 token.auto_groups_duplicate: "Auto 分组 {{.Group}} 重复"
 token.auto_groups_invalid: "Auto 分组 {{.Group}} 不可用或无权访问"
 token.model_mapping_invalid: "模型重定向配置无效：{{.Error}}"
+token.profiles_invalid: "路由配置档无效：{{.Error}}"
+token.profiles_require_auto_group: "路由预设仅在令牌分组为 auto 时可用"
+token.profile_not_found: "路由配置档 {{.Name}} 不存在"
+token.route_preset_not_found: "配置档 {{.Profile}} 中不存在路由预设 {{.Name}}"
 
 # Redemption messages
 redemption.name_length: "兑换码名称长度必须在1-20之间"
