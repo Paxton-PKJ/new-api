@@ -22,6 +22,29 @@ import { z } from 'zod'
 // API Key Schema & Types
 // ============================================================================
 
+export const tokenRoutePresetSchema = z.object({
+  name: z.string(),
+  auto_groups: z.array(z.string()).default([]),
+  cross_group_retry: z.boolean().optional().default(false),
+})
+
+export const tokenProfileSchema = z.object({
+  name: z.string(),
+  model_mapping: z.record(z.string(), z.string()).optional(),
+  model_limits: z.array(z.string()).optional(),
+  active_route_preset: z.string().optional(),
+  route_presets: z.array(tokenRoutePresetSchema).optional(),
+})
+
+export const tokenProfileConfigSchema = z.object({
+  active_profile: z.string().optional(),
+  profiles: z.array(tokenProfileSchema).default([]),
+})
+
+export type TokenRoutePreset = z.infer<typeof tokenRoutePresetSchema>
+export type TokenProfile = z.infer<typeof tokenProfileSchema>
+export type TokenProfileConfig = z.infer<typeof tokenProfileConfigSchema>
+
 export const apiKeySchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -47,6 +70,7 @@ export const apiKeySchema = z.object({
   model_limits: z.string().nullish().default(''),
   model_mapping: z.string().nullish().default(''),
   allow_ips: z.string().nullish().default(''),
+  profiles: tokenProfileConfigSchema.nullish().default(null),
 })
 
 export type ApiKey = z.infer<typeof apiKeySchema>
@@ -96,6 +120,8 @@ export interface ApiKeyFormData {
   group: string
   auto_groups: string[]
   cross_group_retry: boolean
+  /** Stored routing profile document; `null` clears it. */
+  profiles: TokenProfileConfig | null
 }
 
 export interface TokenAutoGroupsConfig {
@@ -113,3 +139,4 @@ export type ApiKeysDialogType =
   | 'delete'
   | 'batch-delete'
   | 'cc-switch'
+  | 'profile-switch'

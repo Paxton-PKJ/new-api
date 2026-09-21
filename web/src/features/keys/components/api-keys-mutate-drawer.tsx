@@ -18,7 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronDown, KeyRound, Settings2, WalletCards } from 'lucide-react'
+import {
+  ChevronDown,
+  KeyRound,
+  Route,
+  Settings2,
+  WalletCards,
+} from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useForm, type SubmitErrorHandler } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -92,6 +98,7 @@ import {
 } from './api-key-group-combobox'
 import { useApiKeys } from './api-keys-provider'
 import { AutoGroupOrderEditor } from './auto-group-order-editor'
+import { TokenProfilesEditor } from './token-profiles-editor'
 
 type ApiKeyMutateDrawerProps = {
   open: boolean
@@ -111,6 +118,7 @@ export function ApiKeysMutateDrawer({
   const { status, loading: statusLoading } = useStatus()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [profilesOpen, setProfilesOpen] = useState(false)
   const [initializedTarget, setInitializedTarget] = useState<string | null>(
     null
   )
@@ -188,6 +196,10 @@ export function ApiKeysMutateDrawer({
       return option ? [option] : []
     })
   }, [globalAutoGroups, groups])
+  const routingGroupOptions = useMemo(
+    () => groups.filter((group) => group.value !== 'auto'),
+    [groups]
+  )
   const maxAutoGroups =
     Number.isInteger(autoGroupsData?.data?.max_count) &&
     Number(autoGroupsData?.data?.max_count) > 0
@@ -224,19 +236,21 @@ export function ApiKeysMutateDrawer({
     if (initializedTarget === target) return
     if (isUpdate && currentRow) {
       if (apiKeyData?.success && apiKeyData.data) {
-        form.reset(
-          transformApiKeyToFormDefaults(
-            apiKeyData.data,
-            availableAutoGroupNames,
-            maxAutoGroups
-          )
+        const defaults = transformApiKeyToFormDefaults(
+          apiKeyData.data,
+          availableAutoGroupNames,
+          maxAutoGroups
         )
+        form.reset(defaults)
+        // Editing a key that already stores routing profiles opens the section.
+        setProfilesOpen(defaults.profiles.length > 0)
         setInitializedTarget(target)
       }
     } else {
       form.reset(
         getApiKeyFormDefaultValues(defaultUseAutoGroup && backendHasAuto)
       )
+      setProfilesOpen(false)
       setInitializedTarget(target)
     }
   }, [
@@ -364,6 +378,9 @@ export function ApiKeysMutateDrawer({
     : t('Enter quota in {{currency}}', { currency: currencyLabel })
   const autoGroupsMode = form.watch('auto_groups_mode')
   const unlimitedQuota = form.watch('unlimited_quota')
+  const routingProfiles = form.watch('profiles')
+  const activeProfile = form.watch('active_profile')
+  const formErrors = form.formState.errors
 
   return (
     <Sheet
@@ -670,6 +687,59 @@ export function ApiKeysMutateDrawer({
                 )}
               />
             </SideDrawerSection>
+
+            <Collapsible open={profilesOpen} onOpenChange={setProfilesOpen}>
+              <SideDrawerSection>
+                <CollapsibleTrigger
+                  render={
+                    <button
+                      type='button'
+                      className='hover:bg-muted/40 flex w-full items-center gap-3 rounded-md py-1.5 text-left transition-colors'
+                    />
+                  }
+                >
+                  <SideDrawerSectionHeader
+                    className='flex-1'
+                    title={t('Routing Profiles')}
+                    description={t(
+                      'Switch the logical model and channel order of this key without changing the client'
+                    )}
+                    icon={<Route className='size-4' />}
+                  />
+                  <ChevronDown
+                    className={cn(
+                      'text-muted-foreground size-4 shrink-0 transition-transform',
+                      profilesOpen && 'rotate-180'
+                    )}
+                  />
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <div className='pt-2'>
+                    <TokenProfilesEditor
+                      value={routingProfiles}
+                      onChange={(profiles) =>
+                        form.setValue('profiles', profiles, {
+                          shouldDirty: true,
+                        })
+                      }
+                      activeProfile={activeProfile}
+                      onActiveProfileChange={(name) =>
+                        form.setValue('active_profile', name, {
+                          shouldDirty: true,
+                        })
+                      }
+                      models={models}
+                      groupOptions={routingGroupOptions}
+                      maxAutoGroups={maxAutoGroups}
+                      groupIsAuto={selectedGroup === 'auto'}
+                      disabled={isSubmitting}
+                      errors={formErrors.profiles}
+                      activeProfileError={formErrors.active_profile}
+                    />
+                  </div>
+                </CollapsibleContent>
+              </SideDrawerSection>
+            </Collapsible>
 
             <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
               <SideDrawerSection>

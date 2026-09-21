@@ -27,6 +27,7 @@ import {
   Copy,
   Link,
   Loader2,
+  Route,
 } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -93,6 +94,7 @@ export function DataTableRowActions<TData>({
   const { chatPresets, serverAddress } = useChatPresets()
   const [isTogglingStatus, setIsTogglingStatus] = useState(false)
   const isRealKeyLoading = Boolean(loadingKeys[apiKey.id])
+  const hasRoutingProfiles = (apiKey.profiles?.profiles?.length ?? 0) > 0
 
   const hasChatPresets = chatPresets.length > 0
   const toggleLabel = isEnabled ? t('Disable') : t('Enable')
@@ -265,6 +267,25 @@ export function DataTableRowActions<TData>({
           {t('CC Switch')}
           <DropdownMenuShortcut>
             <ArrowRightLeft size={16} />
+          </DropdownMenuShortcut>
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={!hasRoutingProfiles}
+          onClick={() => {
+            setCurrentRow(apiKey)
+            setOpen('profile-switch')
+          }}
+        >
+          <span className='flex min-w-0 flex-col'>
+            <span>{t('Switch Routing Profile')}</span>
+            {!hasRoutingProfiles && (
+              <span className='text-muted-foreground text-xs'>
+                {t('No routing profiles configured')}
+              </span>
+            )}
+          </span>
+          <DropdownMenuShortcut>
+            <Route size={16} />
           </DropdownMenuShortcut>
         </DropdownMenuItem>
         {hasChatPresets && (

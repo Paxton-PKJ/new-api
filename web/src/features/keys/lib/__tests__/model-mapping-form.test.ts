@@ -55,6 +55,7 @@ const baseApiKey: ApiKey = {
   model_limits: '',
   model_mapping: '',
   allow_ips: '',
+  profiles: null,
 }
 
 function parseForm(modelMapping: unknown) {

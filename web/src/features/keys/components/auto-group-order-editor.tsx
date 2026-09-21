@@ -45,6 +45,12 @@ type AutoGroupOrderEditorProps = Omit<ComponentProps<'div'>, 'onChange'> & {
   globalOptions: ApiKeyGroupOption[]
   maxCount: number
   onChange: (value: { groups: string[]; mode: 'inherit' | 'custom' }) => void
+  /**
+   * Allows restoring the global Auto order. Callers that require an explicit
+   * group list (for example a route preset) pass `false` to keep the editor in
+   * custom mode without the inheritance controls.
+   */
+  allowInherit?: boolean
   'data-slot'?: string
   'data-form-root'?: string
 }
@@ -53,7 +59,8 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
   const { t } = useTranslation()
   const maxCount =
     Number.isInteger(props.maxCount) && props.maxCount > 0 ? props.maxCount : 5
-  const isInheriting = props.mode === 'inherit'
+  const allowsInherit = props.allowInherit !== false
+  const isInheriting = allowsInherit && props.mode === 'inherit'
   const atLimit = props.value.length >= maxCount
   const candidates = useMemo(
     () =>
@@ -110,17 +117,19 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
                 max: maxCount,
               })}
         </p>
-        <Button
-          type='button'
-          variant='outline'
-          size='sm'
-          disabled={isInheriting}
-          onClick={() => {
-            props.onChange({ groups: [], mode: 'inherit' })
-          }}
-        >
-          {t('Restore global Auto')}
-        </Button>
+        {allowsInherit && (
+          <Button
+            type='button'
+            variant='outline'
+            size='sm'
+            disabled={isInheriting}
+            onClick={() => {
+              props.onChange({ groups: [], mode: 'inherit' })
+            }}
+          >
+            {t('Restore global Auto')}
+          </Button>
+        )}
       </div>
 
       <ApiKeyGroupCombobox
@@ -201,9 +210,11 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
           <EmptyHeader>
             <EmptyTitle>{t('Auto group order')}</EmptyTitle>
             <EmptyDescription>
-              {t(
-                'No valid custom Auto groups remain. Add a group or restore global Auto.'
-              )}
+              {allowsInherit
+                ? t(
+                    'No valid custom Auto groups remain. Add a group or restore global Auto.'
+                  )
+                : t('Select at least one Auto group for this route preset.')}
             </EmptyDescription>
           </EmptyHeader>
         </Empty>

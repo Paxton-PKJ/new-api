@@ -154,12 +154,19 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
         cell: ({ row }) => {
           const apiKey = row.original
           const group = row.getValue('group') as string
+          const activeProfile = apiKey.profiles?.active_profile ?? ''
+          const activePreset =
+            apiKey.profiles?.profiles.find(
+              (profile) => profile.name === activeProfile
+            )?.active_route_preset ?? ''
           return (
             <ApiKeyGroupCell
               group={group}
               ratio={groupRatios[group]}
               crossGroupRetry={apiKey.cross_group_retry}
               shouldReduceMotion={shouldReduceMotion}
+              profileName={activeProfile}
+              presetName={activePreset}
             />
           )
         },

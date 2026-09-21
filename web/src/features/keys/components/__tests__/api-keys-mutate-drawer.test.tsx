@@ -69,10 +69,34 @@ const storedApiKey: ApiKey = {
   model_limits: '',
   model_mapping: '{"claude-opus-4-8":"dsv4f"}',
   allow_ips: '',
+  profiles: null,
+}
+
+const storedProfileApiKey: ApiKey = {
+  ...storedApiKey,
+  profiles: {
+    active_profile: 'dsv4f',
+    profiles: [
+      {
+        name: 'dsv4f',
+        model_mapping: { 'claude-opus-4-8': 'dsv4f' },
+        model_limits: ['dsv4f'],
+        active_route_preset: 'normal',
+        route_presets: [
+          {
+            name: 'normal',
+            auto_groups: ['vip'],
+            cross_group_retry: true,
+          },
+        ],
+      },
+    ],
+  },
 }
 
 type ApiFixtures = {
   updatedPayloads?: Array<Record<string, unknown>>
+  storedRow?: ApiKey
 }
 
 function installApiFixtures(
@@ -105,7 +129,9 @@ function installApiFixtures(
           },
         }
       case '/api/token/7':
-        return { data: { success: true, data: storedApiKey } }
+        return {
+          data: { success: true, data: fixtures.storedRow ?? storedApiKey },
+        }
       default:
         throw new Error(`Unexpected GET ${url}`)
     }
@@ -349,6 +375,7 @@ describe('API keys mutate drawer model redirect integration', () => {
     expect(JSON.parse(String(createdPayloads[0]?.model_mapping))).toEqual({
       'claude-opus-4-8': 'dsv4f',
     })
+    expect(createdPayloads[0]?.profiles).toBe(null)
   })
 
   test('shows a stored redirect when editing and submits it unchanged', async () => {
@@ -367,6 +394,7 @@ describe('API keys mutate drawer model redirect integration', () => {
     expect(JSON.parse(String(updatedPayloads[0]?.model_mapping))).toEqual({
       'claude-opus-4-8': 'dsv4f',
     })
+    expect(updatedPayloads[0]?.profiles).toBe(null)
   })
 
   test('keeps an invalid JSON redirect in the drawer and blocks the request', async () => {
@@ -389,5 +417,76 @@ describe('API keys mutate drawer model redirect integration', () => {
       )
     ).toBeVisible()
     expect(createdPayloads).toHaveLength(0)
+  })
+})
+
+describe('API keys mutate drawer routing profile integration', () => {
+  test('keeps the Routing Profiles section collapsed without profiles', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderDrawer()
+
+    expect(screen.queryByRole('button', { name: 'Add profile' })).toBeNull()
+
+    fireEvent.click(findButton('Routing Profiles', true))
+
+    expect(findButton('Add profile', true)).toBeVisible()
+  })
+
+  test('opens a stored routing profile document and submits it unchanged', async () => {
+    const updatedPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures([], {
+      updatedPayloads,
+      storedRow: storedProfileApiKey,
+    })
+    await renderDrawer(storedProfileApiKey)
+
+    expect(findButton('Add profile', true)).toBeVisible()
+    expect(screen.getByLabelText('Profile name')).toHaveValue('dsv4f')
+    expect(screen.getByLabelText('Active preset')).toHaveTextContent('normal')
+
+    fireEvent.click(findButton('Save changes', true))
+
+    await waitFor(() => expect(updatedPayloads).toHaveLength(1))
+    expect(updatedPayloads[0]?.profiles).toEqual({
+      active_profile: 'dsv4f',
+      profiles: [
+        {
+          name: 'dsv4f',
+          model_mapping: { 'claude-opus-4-8': 'dsv4f' },
+          model_limits: ['dsv4f'],
+          active_route_preset: 'normal',
+          route_presets: [
+            {
+              name: 'normal',
+              auto_groups: ['vip'],
+              cross_group_retry: true,
+            },
+          ],
+        },
+      ],
+    })
+  })
+
+  test('blocks saving when the key group is not auto but profiles keep presets', async () => {
+    const updatedPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures([], {
+      updatedPayloads,
+      storedRow: { ...storedProfileApiKey, group: 'vip' },
+    })
+    await renderDrawer({ ...storedProfileApiKey, group: 'vip' })
+
+    expect(
+      screen.getByText(
+        'Route presets are available when the key group is auto.'
+      )
+    ).toBeVisible()
+
+    fireEvent.click(findButton('Save changes', true))
+
+    expect(
+      await screen.findByText('Route presets require the auto group')
+    ).toBeVisible()
+    expect(updatedPayloads).toHaveLength(0)
   })
 })

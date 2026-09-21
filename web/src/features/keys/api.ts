@@ -108,6 +108,19 @@ export async function updateApiKeyStatus(
   return res.data
 }
 
+// Switch the active routing profile (and its route preset) without sending the
+// rest of the key. An empty `active_profile` clears the selection.
+export async function switchApiKeyProfile(
+  id: number,
+  selection: { active_profile?: string; active_route_preset?: string }
+): Promise<ApiResponse<ApiKey>> {
+  const res = await api.put('/api/token/?profile_only=true', {
+    id,
+    ...selection,
+  })
+  return res.data
+}
+
 // Fetch the real (unmasked) key for a token by ID
 export async function fetchTokenKey(
   id: number

@@ -43,6 +43,8 @@ await i18n.use(initReactI18next).init({
           'No available groups in the global Auto order.',
         'No valid custom Auto groups remain. Add a group or restore global Auto.':
           'No valid custom Auto groups remain. Add a group or restore global Auto.',
+        'Select at least one Auto group for this route preset.':
+          'Select at least one Auto group for this route preset.',
         'No custom groups. Saving will inherit the complete global Auto order.':
           'No custom groups. Saving will inherit the complete global Auto order.',
         'Remove {{group}}': 'Remove {{group}}',
@@ -135,6 +137,25 @@ function CustomEmptyHarness() {
       />
       <output data-testid='order'>{groups.join(',')}</output>
       <output data-testid='mode'>{mode}</output>
+    </I18nextProvider>
+  )
+}
+
+function RequiredGroupsHarness() {
+  const [groups, setGroups] = useState<string[]>([])
+
+  return (
+    <I18nextProvider i18n={i18n}>
+      <AutoGroupOrderEditor
+        value={groups}
+        mode='custom'
+        options={[{ value: 'auto', label: 'auto' }, ...globalOptions]}
+        globalOptions={[]}
+        maxCount={2}
+        allowInherit={false}
+        onChange={(value) => setGroups(value.groups)}
+      />
+      <output data-testid='order'>{groups.join(',')}</output>
     </I18nextProvider>
   )
 }
@@ -361,5 +382,28 @@ describe('Auto group order editor', () => {
     expect(container).toHaveTextContent(
       'No valid custom Auto groups remain. Add a group or restore global Auto.'
     )
+  })
+
+  test('hides the inheritance controls when inheritance is not allowed', () => {
+    const { container } = render(<RequiredGroupsHarness />)
+
+    expect(
+      within(container).queryByRole('button', { name: 'Restore global Auto' })
+    ).toBe(null)
+    expect(container.querySelector('[data-slot="global-auto-order"]')).toBe(
+      null
+    )
+    expect(container).toHaveTextContent('0 / 2 groups selected')
+    expect(container).toHaveTextContent(
+      'Select at least one Auto group for this route preset.'
+    )
+
+    fireEvent.click(within(container).getByRole('combobox'))
+    fireEvent.click(getCommandItem('VIP'))
+
+    expect(within(container).getByTestId('order')).toHaveTextContent('vip')
+    expect(
+      within(container).queryByRole('button', { name: 'Restore global Auto' })
+    ).toBe(null)
   })
 })

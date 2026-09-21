@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { BadgeCell, TruncatedCell } from '@/components/data-table'
@@ -36,6 +37,10 @@ type ApiKeyGroupCellProps = {
   group: string
   ratio?: GroupRatio
   shouldReduceMotion: boolean
+  /** Active routing profile; shown under the group badge when set. */
+  profileName?: string
+  /** Active route preset of that profile. */
+  presetName?: string
 }
 
 export function ApiKeyGroupCell(props: ApiKeyGroupCellProps) {
@@ -43,10 +48,52 @@ export function ApiKeyGroupCell(props: ApiKeyGroupCellProps) {
   const isMobile = useMediaQuery('(max-width: 640px)')
 
   const group = props.group?.trim() || ''
-  if (group !== 'auto') {
+  const profileName = props.profileName?.trim() || ''
+  const profileLabel = [profileName, props.presetName?.trim() || '']
+    .filter(Boolean)
+    .join(' · ')
+
+  let content: ReactNode
+  if (group === 'auto') {
+    content = (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <BadgeCell
+              data-api-key-group-cell='auto'
+              tabIndex={0}
+              className={cn(
+                'ml-0 gap-3 overflow-visible text-xs',
+                isMobile ? 'w-full justify-between' : 'max-w-50'
+              )}
+            />
+          }
+        >
+          <StatusBadge
+            label={t('Cross-group')}
+            variant='info'
+            copyable={false}
+            className='px-0'
+          />
+          <GroupRatioBadge
+            ratio={props.ratio}
+            isAuto
+            shouldReduceMotion={props.shouldReduceMotion}
+          />
+        </TooltipTrigger>
+        <TooltipContent>
+          <span className='text-xs'>
+            {t(
+              'Automatically selects the best available group with circuit breaker mechanism'
+            )}
+          </span>
+        </TooltipContent>
+      </Tooltip>
+    )
+  } else {
     const ratio =
       group && typeof props.ratio === 'number' ? props.ratio : undefined
-    return (
+    content = (
       <TruncatedCell
         className={isMobile ? 'w-full' : 'max-w-50'}
         tabIndex={0}
@@ -64,39 +111,18 @@ export function ApiKeyGroupCell(props: ApiKeyGroupCellProps) {
     )
   }
 
+  if (!profileLabel) return content
+
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <BadgeCell
-            data-api-key-group-cell='auto'
-            tabIndex={0}
-            className={cn(
-              'ml-0 gap-3 overflow-visible text-xs',
-              isMobile ? 'w-full justify-between' : 'max-w-50'
-            )}
-          />
-        }
+    <div className='flex min-w-0 flex-col gap-1'>
+      {content}
+      <span
+        data-slot='api-key-group-profile'
+        title={t('Routing profile')}
+        className='text-muted-foreground truncate text-xs'
       >
-        <StatusBadge
-          label={t('Cross-group')}
-          variant='info'
-          copyable={false}
-          className='px-0'
-        />
-        <GroupRatioBadge
-          ratio={props.ratio}
-          isAuto
-          shouldReduceMotion={props.shouldReduceMotion}
-        />
-      </TooltipTrigger>
-      <TooltipContent>
-        <span className='text-xs'>
-          {t(
-            'Automatically selects the best available group with circuit breaker mechanism'
-          )}
-        </span>
-      </TooltipContent>
-    </Tooltip>
+        {profileLabel}
+      </span>
+    </div>
   )
 }

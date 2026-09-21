@@ -34,6 +34,7 @@ await i18n.use(initReactI18next).init({
         Auto: 'Auto',
         'Cross-group': 'Cross-group',
         Ratio: 'Ratio',
+        'Routing profile': 'Routing profile',
         'Automatically selects the best available group with circuit breaker mechanism':
           'Automatically selects the best available group with circuit breaker mechanism',
       },
@@ -46,6 +47,8 @@ function CellHarness(props: {
   ratio?: number | string
   crossGroupRetry?: boolean
   shouldReduceMotion?: boolean
+  profileName?: string
+  presetName?: string
 }) {
   return (
     <I18nextProvider i18n={i18n}>
@@ -55,6 +58,8 @@ function CellHarness(props: {
           ratio={props.ratio}
           crossGroupRetry={props.crossGroupRetry ?? false}
           shouldReduceMotion={props.shouldReduceMotion ?? false}
+          profileName={props.profileName}
+          presetName={props.presetName}
         />
       </TooltipProvider>
     </I18nextProvider>
@@ -156,5 +161,40 @@ describe('API key group table cell', () => {
     expect(screen.getByText('vip')).toBeInTheDocument()
     expect(screen.queryByText('Auto')).not.toBeInTheDocument()
     expect(screen.queryByText('自动')).not.toBeInTheDocument()
+  })
+
+  test('shows the active routing profile and its preset under the group badge', () => {
+    const { container } = render(
+      <CellHarness
+        group='auto'
+        ratio='Auto'
+        profileName='dsv4f'
+        presetName='normal'
+      />
+    )
+
+    const line = screen.getByText('dsv4f · normal')
+    expect(line).toHaveAttribute('data-slot', 'api-key-group-profile')
+    expect(line).toHaveClass('text-muted-foreground', 'text-xs', 'truncate')
+    expect(line).toHaveAttribute('title', 'Routing profile')
+    expect(
+      container.querySelector('[data-api-key-group-cell="auto"]')
+    ).toBeInTheDocument()
+  })
+
+  test('shows only the profile name when the profile has no active preset', () => {
+    render(<CellHarness group='vip' ratio={2} profileName='dsv4f' />)
+
+    expect(screen.getByText('dsv4f')).toHaveClass('truncate')
+    expect(screen.queryByText('dsv4f ·')).not.toBeInTheDocument()
+    expect(screen.getByText('vip')).toBeInTheDocument()
+  })
+
+  test('does not add a routing profile line for keys without one', () => {
+    const { container } = render(<CellHarness group='vip' ratio={2} />)
+
+    expect(
+      container.querySelector('[data-slot="api-key-group-profile"]')
+    ).toBeNull()
   })
 })
