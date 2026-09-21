@@ -348,6 +348,7 @@ function TokenProfileCard(props: TokenProfileCardProps) {
                         </p>
                       </div>
                       <Switch
+                        aria-label={t('Cross-group retry')}
                         checked={preset.cross_group_retry}
                         onCheckedChange={(checked) =>
                           updatePreset(preset.id, {
