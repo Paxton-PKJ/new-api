@@ -607,6 +607,44 @@ it('disabling global affinity preserves every rule and saves zero retries as zer
   expect(screen.getByRole('table')).toHaveTextContent('Do not keep sessions')
 })
 
+it('saves an edited same-channel budget without writing unchanged attempt caps', async () => {
+  currentOptions = {
+    ...options,
+    DefaultSameChannelRetryTimes: '1',
+    MaxTotalAttempts: '8',
+  }
+  show()
+  const sameChannel = await screen.findByRole('spinbutton', {
+    name: 'Default same-channel retries',
+  })
+  expect(sameChannel).toHaveValue(1)
+  expect(
+    screen.getByRole('spinbutton', { name: 'Maximum total attempts' })
+  ).toHaveValue(8)
+  fireEvent.change(sameChannel, { target: { value: '3' } })
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  expect(vi.mocked(api.patch).mock.calls[0][1]).toEqual({
+    options: { DefaultSameChannelRetryTimes: '3' },
+  })
+})
+
+it('rejects a same-channel budget outside the supported range without saving', async () => {
+  currentOptions = {
+    ...options,
+    DefaultSameChannelRetryTimes: '1',
+    MaxTotalAttempts: '8',
+  }
+  show()
+  const sameChannel = await screen.findByRole('spinbutton', {
+    name: 'Default same-channel retries',
+  })
+  fireEvent.change(sameChannel, { target: { value: '11' } })
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(sameChannel).toHaveAttribute('aria-invalid', 'true')
+  expect(api.patch).not.toHaveBeenCalled()
+})
+
 it('invalid JSON stays editable and prevents saving', async () => {
   show()
   await userEvent.click(await screen.findByRole('tab', { name: 'JSON' }))

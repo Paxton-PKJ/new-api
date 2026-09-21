@@ -32,6 +32,12 @@ export function policyLabel(t: TFunction, value: string): string {
       return t('Status is outside the retry rules')
     case 'retry_status_matched':
       return t('Status matches the retry rules')
+    case 'same_channel_retry':
+      return t('Retried on the same channel')
+    case 'max_total_attempts':
+      return t('Maximum total attempts reached')
+    case 'response_started':
+      return t('Response already started, retry skipped')
     case 'session_rule_matched':
       return t('Session rule matched')
     case 'channel_selected':

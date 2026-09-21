@@ -6,6 +6,8 @@ import { parseHttpStatusCodeRules } from '@/lib/http-status-code-rules'
 export function createRoutingPolicySchema(t: TFunction) {
   return z.object({
     RetryTimes: z.number().int().min(0).max(99),
+    DefaultSameChannelRetryTimes: z.number().int().min(0).max(10),
+    MaxTotalAttempts: z.number().int().min(0).max(999),
     AutomaticRetryStatusCodes: z
       .string()
       .refine(
@@ -48,6 +50,12 @@ export function routingPolicyFormValues(
 ): RoutingPolicyFormValues {
   return {
     RetryTimes: Number(options.RetryTimes),
+    // Older servers may not report these options yet; fall back to the default
+    // so a missing key never turns the form value into NaN.
+    DefaultSameChannelRetryTimes: Number(
+      options.DefaultSameChannelRetryTimes ?? 0
+    ),
+    MaxTotalAttempts: Number(options.MaxTotalAttempts ?? 0),
     AutomaticRetryStatusCodes: options.AutomaticRetryStatusCodes,
     channel_affinity_setting: {
       enabled: options['channel_affinity_setting.enabled'] === 'true',
@@ -71,6 +79,8 @@ export function routingPolicyOptions(
 ): Record<string, string> {
   return {
     RetryTimes: String(values.RetryTimes),
+    DefaultSameChannelRetryTimes: String(values.DefaultSameChannelRetryTimes),
+    MaxTotalAttempts: String(values.MaxTotalAttempts),
     AutomaticRetryStatusCodes: values.AutomaticRetryStatusCodes,
     ...Object.fromEntries(
       Object.entries(values.channel_affinity_setting).map(([key, value]) => [

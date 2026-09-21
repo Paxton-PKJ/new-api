@@ -33,6 +33,7 @@ import {
   waitFor,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import i18next from 'i18next'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -47,6 +48,7 @@ import {
   defaultRequestPolicySettings,
   type RequestPolicySettings,
 } from '../defaults'
+import { policyLabel } from '../policy-label'
 
 type PolicyBeforeLoad = (context: { params: { section: string } }) => void
 
@@ -347,6 +349,18 @@ describe('request policy settings', () => {
       })
     ).toHaveValue(3600)
     expect(api.put).not.toHaveBeenCalled()
+  })
+
+  it('labels the retry decisions recorded for a request in English', () => {
+    expect(policyLabel(i18next.t.bind(i18next), 'same_channel_retry')).toBe(
+      'Retried on the same channel'
+    )
+    expect(policyLabel(i18next.t.bind(i18next), 'max_total_attempts')).toBe(
+      'Maximum total attempts reached'
+    )
+    expect(policyLabel(i18next.t.bind(i18next), 'response_started')).toBe(
+      'Response already started, retry skipped'
+    )
   })
 
   it.each([

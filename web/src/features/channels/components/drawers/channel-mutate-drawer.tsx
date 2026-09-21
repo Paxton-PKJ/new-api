@@ -170,6 +170,7 @@ import {
   channelFormSchema,
   channelsQueryKeys,
   getAdvancedCustomStats,
+  MAX_SAME_CHANNEL_RETRY_TIMES,
   transformChannelToFormDefaults,
   type ChannelFormValues,
   deduplicateKeys,
@@ -299,6 +300,7 @@ const SENSITIVE_FORM_FIELDS = [
   'proxy',
   'http_protocol',
   'http2_connection_shards',
+  'same_channel_retry_times',
   'pass_through_body_enabled',
   'responses_websocket_enabled',
   'system_prompt',
@@ -2151,6 +2153,60 @@ export function ChannelMutateDrawer({
                 : t(
                     'Spread HTTP/2 traffic across multiple reusable connections to the same upstream origin (1-8).'
                   )}
+            </FormDescription>
+            <FormMessage />
+          </FormItem>
+        )
+      }}
+    />
+  )
+
+  const sameChannelRetryFields = (
+    <FormField
+      control={form.control}
+      name='same_channel_retry_times'
+      render={({ field }) => {
+        const retryItems = [
+          { value: 'inherit', label: t('Inherit global default') },
+          { value: '0', label: t('Disabled') },
+          ...Array.from(
+            { length: MAX_SAME_CHANNEL_RETRY_TIMES },
+            (_, index) => {
+              const value = String(index + 1)
+              return { value, label: value }
+            }
+          ),
+        ]
+        return (
+          <FormItem>
+            <FormLabel>{t('Same-channel retries')}</FormLabel>
+            <Select
+              items={retryItems}
+              value={field.value == null ? 'inherit' : String(field.value)}
+              disabled={sensitiveLocked}
+              onValueChange={(value) => {
+                field.onChange(value === 'inherit' ? null : Number(value))
+              }}
+            >
+              <FormControl>
+                <SelectTrigger disabled={sensitiveLocked}>
+                  <SelectValue />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent alignItemWithTrigger={false}>
+                <SelectGroup>
+                  {retryItems.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <FormDescription>
+              {t(
+                'Extra in-place attempts on this channel after a retryable failure, before switching channels. Retries never resend once the client has received any bytes.'
+              )}
             </FormDescription>
             <FormMessage />
           </FormItem>
@@ -4690,6 +4746,7 @@ export function ChannelMutateDrawer({
                 {proxyFields}
                 {httpProtocolFields}
                 {httpShardsFields}
+                {sameChannelRetryFields}
               </fieldset>
             </div>
             {upstreamModelDetectionFields}

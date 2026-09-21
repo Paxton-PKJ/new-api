@@ -231,6 +231,34 @@ test.each([true, false])(
 
 test.each([
   {
+    other: {
+      model_price: 0.25,
+      token_profile: 'dsv4f',
+      route_preset: 'normal',
+    },
+    shown: true,
+  },
+  { other: { model_price: 0.25 }, shown: false },
+])(
+  'the opened dialog shows the routing profile and route preset rows only when recorded: $shown',
+  async ({ other, shown }) => {
+    const preview = renderPreview(other)
+    fireEvent.click(preview)
+    const dialog = within(await screen.findByRole('dialog'))
+    if (shown) {
+      expect(dialog.getByText('Routing Profile')).toBeVisible()
+      expect(dialog.getByText('dsv4f')).toBeVisible()
+      expect(dialog.getByText('Route Preset')).toBeVisible()
+      expect(dialog.getByText('normal')).toBeVisible()
+    } else {
+      expect(dialog.queryByText('Routing Profile')).not.toBeInTheDocument()
+      expect(dialog.queryByText('Route Preset')).not.toBeInTheDocument()
+    }
+  }
+)
+
+test.each([
+  {
     expression: 'tier("music", u("clips") * 0.25)',
     tier: 'music',
     expected: 'music · clips $0.25/unit',

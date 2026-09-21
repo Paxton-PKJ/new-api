@@ -199,6 +199,10 @@ export interface LogOtherData {
   upstream_model_name?: string
   // Model name the client sent, set when a token model redirect rewrote it.
   client_model?: string
+  // Active token routing profile and route preset, recorded when they took
+  // effect for the request.
+  token_profile?: string
+  route_preset?: string
   // Diagnostic only. Whether the names disagree is derived in the UI via
   // isResponseModelMismatch so old rows follow the current comparison rule.
   response_model?: {

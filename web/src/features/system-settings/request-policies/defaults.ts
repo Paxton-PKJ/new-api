@@ -21,6 +21,8 @@ import type { SecuritySettings } from '../types'
 
 export type RetrySettings = {
   RetryTimes: number
+  DefaultSameChannelRetryTimes: number
+  MaxTotalAttempts: number
   AutomaticRetryStatusCodes: string
 }
 export type HealthSettings = {
@@ -48,6 +50,8 @@ export type RequestPolicySettings = RetrySettings &
 
 export const defaultRequestPolicySettings: RequestPolicySettings = {
   RetryTimes: 0,
+  DefaultSameChannelRetryTimes: 0,
+  MaxTotalAttempts: 0,
   AutomaticRetryStatusCodes:
     '100-199,300-399,401-407,409-499,500-503,505-523,525-599',
   ChannelDisableThreshold: '',

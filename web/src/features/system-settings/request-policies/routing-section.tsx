@@ -92,6 +92,11 @@ function RoutingPolicyEditor(props: { config: PolicyConfig }) {
     const delta = Object.fromEntries(
       Object.entries(next).filter(([key, value]) => {
         const previous = props.config.options[key]
+        // Options the server did not report stay untouched, so a newer
+        // frontend never writes settings an older backend cannot validate.
+        if (previous === undefined) {
+          return false
+        }
         if (key === 'channel_affinity_setting.rules') {
           return (
             JSON.stringify(JSON.parse(value)) !==

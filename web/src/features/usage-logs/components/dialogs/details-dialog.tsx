@@ -1140,6 +1140,20 @@ export function DetailsDialog(props: DetailsDialogProps) {
             mono
           />
         )}
+        {other?.token_profile && (
+          <DetailRow
+            label={t('Routing Profile')}
+            value={other.token_profile}
+            mono
+          />
+        )}
+        {other?.route_preset && (
+          <DetailRow
+            label={t('Route Preset')}
+            value={other.route_preset}
+            mono
+          />
+        )}
         {/* Model mapping for logs without response observations */}
         {!other?.response_model &&
           other?.is_model_mapped &&

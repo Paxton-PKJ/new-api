@@ -91,6 +91,8 @@ export interface ChannelSettings {
   system_prompt_override?: boolean
   http_protocol?: 'auto' | 'http1' | string
   http2_connection_shards?: number
+  // Extra in-place retries on this channel; absent means inherit the global default.
+  same_channel_retry_times?: number
 }
 
 export interface ChannelOtherSettings {

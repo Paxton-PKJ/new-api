@@ -63,6 +63,54 @@ export function RetrySection() {
         />
         <FormField
           control={form.control}
+          name='DefaultSameChannelRetryTimes'
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>{t('Default same-channel retries')}</FormLabel>
+              <FormControl>
+                <Input
+                  type='number'
+                  min={0}
+                  max={10}
+                  step={1}
+                  {...safeNumberFieldProps(field)}
+                />
+              </FormControl>
+              <FormDescription>
+                {t(
+                  'Extra in-place attempts on the same channel before switching. Channels can override this; 0 disables.'
+                )}
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        <FormField
+          control={form.control}
+          name='MaxTotalAttempts'
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>{t('Maximum total attempts')}</FormLabel>
+              <FormControl>
+                <Input
+                  type='number'
+                  min={0}
+                  max={999}
+                  step={1}
+                  {...safeNumberFieldProps(field)}
+                />
+              </FormControl>
+              <FormDescription>
+                {t(
+                  'Hard cap on upstream attempts per request across all channels and groups. 0 means unlimited.'
+                )}
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        <FormField
+          control={form.control}
           name='AutomaticRetryStatusCodes'
           render={({ field }) => (
             <FormItem>

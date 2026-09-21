@@ -81,6 +81,24 @@ function isOptionalProxyURL(value: string | undefined): boolean {
 export const HTTP_PROTOCOL_AUTO = 'auto'
 export const HTTP_PROTOCOL_HTTP1 = 'http1'
 export const MAX_HTTP2_CONNECTION_SHARDS = 8
+export const MAX_SAME_CHANNEL_RETRY_TIMES = 10
+
+/**
+ * Normalize the channel-level same-channel retry budget.
+ *
+ * `null` means the channel inherits the global default, so anything that is
+ * not an integer inside the supported range is treated as "not set" instead of
+ * being clamped, because the backend rejects out-of-range values.
+ */
+export function normalizeSameChannelRetryTimes(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    return null
+  }
+  if (value < 0 || value > MAX_SAME_CHANNEL_RETRY_TIMES) {
+    return null
+  }
+  return value
+}
 
 export function normalizeHttpProtocol(
   value: string | undefined | null
@@ -268,6 +286,8 @@ export const channelFormSchema = z
       .refine(isOptionalProxyURL, ERROR_MESSAGES.INVALID_PROXY),
     http_protocol: z.enum(['auto', 'http1']).optional(),
     http2_connection_shards: z.number().int().optional(),
+    // null or absent means the channel inherits the global default.
+    same_channel_retry_times: z.number().int().nullable().optional(),
     pass_through_body_enabled: z.boolean().optional(),
     responses_websocket_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
@@ -417,6 +437,19 @@ export const channelFormSchema = z
         ERROR_MESSAGES.INVALID_HTTP1_WITH_SHARDS
       )
     }
+
+    const sameChannelRetries = data.same_channel_retry_times
+    if (
+      sameChannelRetries != null &&
+      (sameChannelRetries < 0 ||
+        sameChannelRetries > MAX_SAME_CHANNEL_RETRY_TIMES)
+    ) {
+      addRequiredIssue(
+        ctx,
+        'same_channel_retry_times',
+        ERROR_MESSAGES.INVALID_SAME_CHANNEL_RETRY_TIMES
+      )
+    }
   })
 
 export type ChannelFormValues = z.infer<typeof channelFormSchema>
@@ -459,6 +492,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   proxy: '',
   http_protocol: HTTP_PROTOCOL_AUTO,
   http2_connection_shards: 1,
+  same_channel_retry_times: null,
   pass_through_body_enabled: false,
   responses_websocket_enabled: false,
   system_prompt: '',
@@ -503,6 +537,7 @@ export function transformChannelToFormDefaults(
     proxy: '',
     http_protocol: HTTP_PROTOCOL_AUTO as 'auto' | 'http1',
     http2_connection_shards: 1,
+    same_channel_retry_times: null as number | null,
     pass_through_body_enabled: false,
     responses_websocket_enabled: false,
     system_prompt: '',
@@ -524,6 +559,9 @@ export function transformChannelToFormDefaults(
         proxy: parsed.proxy || '',
         http_protocol: protocol,
         http2_connection_shards: protocol === HTTP_PROTOCOL_HTTP1 ? 1 : shards,
+        same_channel_retry_times: normalizeSameChannelRetryTimes(
+          parsed.same_channel_retry_times
+        ),
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         responses_websocket_enabled:
           parsed.responses_websocket_enabled === true,
@@ -676,6 +714,14 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     settingObj.http_protocol = HTTP_PROTOCOL_HTTP1
   } else if (shards > 1) {
     settingObj.http2_connection_shards = shards
+  }
+
+  const sameChannelRetries = normalizeSameChannelRetryTimes(
+    formData.same_channel_retry_times
+  )
+  // Inheriting the global default keeps the key out of the saved JSON.
+  if (sameChannelRetries !== null) {
+    settingObj.same_channel_retry_times = sameChannelRetries
   }
 
   return JSON.stringify(settingObj)

@@ -84,6 +84,7 @@ const CONFIGURATION_BLOCKS = {
       'proxy',
       'http_protocol',
       'http2_connection_shards',
+      'same_channel_retry_times',
       'disable_task_polling_sleep',
     ],
   },
@@ -175,6 +176,7 @@ export function getChannelConfigurationState(
       values.proxy?.trim() ||
       (values.http_protocol && values.http_protocol !== 'auto') ||
       (values.http2_connection_shards ?? 1) > 1 ||
+      values.same_channel_retry_times != null ||
       values.disable_task_polling_sleep
     ),
     upstreamModelDetection:
