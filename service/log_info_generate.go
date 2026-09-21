@@ -77,6 +77,14 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 	if clientModel := common.GetContextKeyString(ctx, constant.ContextKeyTokenModelMappingClientModel); clientModel != "" {
 		other.SetPublic("client_model", clientModel)
 	}
+	// Active routing profile/preset names are the token owner's own configuration,
+	// so they are public in their logs; only the names are recorded, never their contents.
+	if profile := common.GetContextKeyString(ctx, constant.ContextKeyTokenProfile); profile != "" {
+		other.SetPublic("token_profile", profile)
+	}
+	if preset := common.GetContextKeyString(ctx, constant.ContextKeyTokenRoutePreset); preset != "" {
+		other.SetPublic("route_preset", preset)
+	}
 	if relayInfo != nil {
 		if billingModel := relayInfo.GetBillingModelName(); billingModel != "" && billingModel != relayInfo.OriginModelName {
 			other.SetAdmin("billing_model", billingModel)

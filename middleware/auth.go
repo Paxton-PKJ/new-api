@@ -507,6 +507,18 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 	if token == nil {
 		return fmt.Errorf("token is nil")
 	}
+	if token.GetProfiles() != "" && token.GetProfileConfig() == nil {
+		logger.LogWarn(c, "token %d has invalid profiles, profiles skipped", token.Id)
+	}
+	// 活动配置档叠加到令牌副本上：后续字段读取自然拿到叠加后的值。
+	effective, profileName, presetName := token.ResolveActiveProfile()
+	token = effective
+	if profileName != "" {
+		common.SetContextKey(c, constant.ContextKeyTokenProfile, profileName)
+	}
+	if presetName != "" {
+		common.SetContextKey(c, constant.ContextKeyTokenRoutePreset, presetName)
+	}
 	c.Set("id", token.UserId)
 	c.Set("token_id", token.Id)
 	c.Set("token_key", token.Key)

@@ -23,6 +23,8 @@ const (
 	ContextKeyTokenAutoGroups              ContextKey = "token_auto_groups"
 	ContextKeyTokenModelMapping            ContextKey = "token_model_mapping"              // 值类型 map[string]string，由 SetupContextForToken 注入（Task B）
 	ContextKeyTokenModelMappingClientModel ContextKey = "token_model_mapping_client_model" // 值类型 string，仅在映射命中时设置（Task B）
+	ContextKeyTokenProfile                 ContextKey = "token_profile"                    // 值类型 string，仅在活动配置档生效时设置（Task G）
+	ContextKeyTokenRoutePreset             ContextKey = "token_route_preset"               // 值类型 string，仅在活动路由预设生效时设置（Task G）
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"

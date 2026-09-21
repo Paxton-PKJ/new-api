@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # fork-only dev workflow helper, exclude from upstream PR.
 #
-# Upgrade + idempotency check for the token model_mapping migration:
+# Upgrade + idempotency check for the token text columns added by this fork
+# (model_mapping, profiles):
 #   1. the upstream baseline binary creates the schema,
 #   2. a legacy token row is inserted,
 #   3. the head binary starts twice (once with Redis enabled),
-#   4. tokens.model_mapping must be nullable text, the legacy row must stay NULL,
-#      and both head startups must produce an identical schema.
+#   4. tokens.model_mapping and tokens.profiles must be nullable text, the legacy
+#      row must stay NULL in both, and both head startups must produce an
+#      identical schema.
 #
 # Usage: dev-ci-db-upgrade.sh <sqlite|mysql|postgres>
 # Requires pre-built binaries at /tmp/new-api-baseline and /tmp/new-api-head.
 set -euo pipefail
+
+# token columns that must exist as nullable text after the head migration.
+token_text_columns="model_mapping profiles"
 
 dialect="${1:-}"
 case "$dialect" in
@@ -201,33 +206,39 @@ print_columns() {
 }
 
 assert_column_present() {
-  local columns
-  columns=$(columns_snapshot | tr 'A-Z' 'a-z')
+  local snapshot
+  snapshot=$(columns_snapshot | tr 'A-Z' 'a-z')
   print_columns
-  if [ -z "$columns" ]; then
+  if [ -z "$snapshot" ]; then
     echo "::error::tokens table missing on ${dialect}"
     exit 1
   fi
-  if ! grep -qx 'model_mapping|text|yes' <<<"$columns"; then
-    echo "::error::expected a nullable text column tokens.model_mapping on ${dialect}"
-    exit 1
-  fi
-  echo "OK: tokens.model_mapping is text and nullable (${dialect})"
+  local column
+  for column in $token_text_columns; do
+    if ! grep -qx "${column}|text|yes" <<<"$snapshot"; then
+      echo "::error::expected a nullable text column tokens.${column} on ${dialect}"
+      exit 1
+    fi
+    echo "OK: tokens.${column} is text and nullable (${dialect})"
+  done
 }
 
 assert_column_absent() {
-  local columns
-  columns=$(columns_snapshot | tr 'A-Z' 'a-z')
+  local snapshot
+  snapshot=$(columns_snapshot | tr 'A-Z' 'a-z')
   print_columns
-  if [ -z "$columns" ]; then
+  if [ -z "$snapshot" ]; then
     echo "::error::baseline binary did not create the tokens table on ${dialect}"
     exit 1
   fi
-  if grep -q '^model_mapping|' <<<"$columns"; then
-    echo "::error::baseline schema already contains tokens.model_mapping on ${dialect}"
-    exit 1
-  fi
-  echo "OK: baseline schema has no tokens.model_mapping column (${dialect})"
+  local column
+  for column in $token_text_columns; do
+    if grep -q "^${column}|" <<<"$snapshot"; then
+      echo "::error::baseline schema already contains tokens.${column} on ${dialect}"
+      exit 1
+    fi
+    echo "OK: baseline schema has no tokens.${column} column (${dialect})"
+  done
 }
 
 schema_dump() {
@@ -269,13 +280,15 @@ echo "OK: schema diff between the two head startups is empty (${dialect})"
 
 assert_column_present
 
-legacy_state=$(run_sql "SELECT CASE WHEN model_mapping IS NULL THEN 'null' ELSE 'not-null' END FROM tokens WHERE ${key_column} = '${legacy_key}'" | tr -d '[:space:]')
 legacy_key_state=$(run_sql "SELECT ${key_column} FROM tokens WHERE ${key_column} = '${legacy_key}'" | tr -d '[:space:]')
-echo "legacy row: model_mapping=${legacy_state} key=${legacy_key_state}"
-if [ "$legacy_state" != "null" ]; then
-  echo "::error::legacy token row model_mapping is not NULL on ${dialect}"
-  exit 1
-fi
+for column in $token_text_columns; do
+  legacy_state=$(run_sql "SELECT CASE WHEN ${column} IS NULL THEN 'null' ELSE 'not-null' END FROM tokens WHERE ${key_column} = '${legacy_key}'" | tr -d '[:space:]')
+  echo "legacy row: ${column}=${legacy_state} key=${legacy_key_state}"
+  if [ "$legacy_state" != "null" ]; then
+    echo "::error::legacy token row ${column} is not NULL on ${dialect}"
+    exit 1
+  fi
+done
 if [ "$legacy_key_state" != "$legacy_key" ]; then
   echo "::error::legacy token key was not preserved on ${dialect}"
   exit 1

@@ -213,20 +213,30 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 }
 
 // A token model redirect is the token owner's own configuration, so the
-// client-facing model name is public in their consume and error logs.
+// client-facing model name is public in their consume and error logs. The
+// active routing profile and route preset are recorded by name only.
 func TestAppendRelayLogAdminInfoExposesTokenMappedClientModel(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	common.SetContextKey(c, constant.ContextKeyTokenModelMappingClientModel, "claude-opus-4-8")
+	common.SetContextKey(c, constant.ContextKeyTokenProfile, "dsv4f")
+	common.SetContextKey(c, constant.ContextKeyTokenRoutePreset, "normal")
 	mapped := model.NewLogOther()
 	AppendRelayLogAdminInfo(c, nil, mapped)
 	snapshot := mapped.Snapshot()
 	assert.Equal(t, "claude-opus-4-8", snapshot["client_model"])
+	assert.Equal(t, "dsv4f", snapshot["token_profile"])
+	assert.Equal(t, "normal", snapshot["route_preset"])
 	adminInfo, ok := snapshot["admin_info"].(map[string]any)
 	require.True(t, ok)
 	assert.NotContains(t, adminInfo, "client_model", "the client model is displayed to the token owner, not admin-only")
+	assert.NotContains(t, adminInfo, "token_profile")
+	assert.NotContains(t, adminInfo, "route_preset")
 
 	unmapped, _ := gin.CreateTestContext(httptest.NewRecorder())
 	unmappedOther := model.NewLogOther()
 	AppendRelayLogAdminInfo(unmapped, nil, unmappedOther)
-	assert.NotContains(t, unmappedOther.Snapshot(), "client_model")
+	unmappedSnapshot := unmappedOther.Snapshot()
+	assert.NotContains(t, unmappedSnapshot, "client_model")
+	assert.NotContains(t, unmappedSnapshot, "token_profile")
+	assert.NotContains(t, unmappedSnapshot, "route_preset")
 }

@@ -25,6 +25,7 @@ type Token struct {
 	ModelLimitsEnabled bool           `json:"model_limits_enabled"`
 	ModelLimits        string         `json:"model_limits" gorm:"type:text"`
 	ModelMapping       *string        `json:"model_mapping" gorm:"type:text"` // 令牌级模型重定向规则（JSON 对象字符串），NULL 表示未配置
+	Profiles           *string        `json:"-" gorm:"type:text"`             // 令牌路由配置档（JSON 文档），NULL 表示未配置；API 层以类型化字段暴露
 	AllowIps           *string        `json:"allow_ips" gorm:"default:''"`
 	UsedQuota          int            `json:"used_quota" gorm:"default:0"` // used quota
 	Group              string         `json:"group" gorm:"default:''"`
@@ -314,7 +315,7 @@ func (token *Token) Update() (err error) {
 		common.SysLog("failed to invalidate token cache before update: " + cacheErr.Error())
 	}
 	return DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
-		"model_limits_enabled", "model_limits", "model_mapping", "allow_ips", "group", "cross_group_retry", "auto_groups").Updates(token).Error
+		"model_limits_enabled", "model_limits", "model_mapping", "profiles", "allow_ips", "group", "cross_group_retry", "auto_groups").Updates(token).Error
 }
 
 func (token *Token) SelectUpdate() (err error) {

@@ -148,6 +148,7 @@ func TestTokenModelMappingRoundTripThroughRedisHashCache(t *testing.T) {
 	server := useUserCacheMiniRedis(t)
 	allowIps := "127.0.0.1"
 	mapping := `{"b":"c","claude-opus-4-8":"dsv4f"}`
+	profiles := `{"active_profile":"dsv4f","profiles":[{"name":"dsv4f","model_mapping":{"claude-opus-4-8":"dsv4f"}}]}`
 	token := Token{
 		Id:                 42,
 		UserId:             7,
@@ -161,6 +162,7 @@ func TestTokenModelMappingRoundTripThroughRedisHashCache(t *testing.T) {
 		ModelLimitsEnabled: true,
 		ModelLimits:        "gpt-4o,claude-opus-4-8",
 		ModelMapping:       &mapping,
+		Profiles:           &profiles,
 		AllowIps:           &allowIps,
 		RemainQuota:        123456,
 		UsedQuota:          654321,
@@ -184,6 +186,8 @@ func TestTokenModelMappingRoundTripThroughRedisHashCache(t *testing.T) {
 	assert.Equal(t, token.ModelLimitsEnabled, cached.ModelLimitsEnabled)
 	assert.Equal(t, token.ModelLimits, cached.ModelLimits)
 	assert.Equal(t, token.ModelMapping, cached.ModelMapping)
+	assert.Equal(t, token.Profiles, cached.Profiles)
+	assert.Equal(t, profiles, cached.GetProfiles())
 	assert.Equal(t, token.AllowIps, cached.AllowIps)
 	assert.Equal(t, token.RemainQuota, cached.RemainQuota)
 	assert.Equal(t, token.UsedQuota, cached.UsedQuota)
@@ -207,6 +211,8 @@ func TestTokenModelMappingRoundTripThroughRedisHashCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, cachedUnmapped.ModelMapping)
 	assert.Empty(t, cachedUnmapped.GetModelMapping())
+	assert.Nil(t, cachedUnmapped.Profiles)
+	assert.Empty(t, cachedUnmapped.GetProfiles())
 }
 
 func TestTokenUpdateInvalidatesPreheatedModelMappingCache(t *testing.T) {

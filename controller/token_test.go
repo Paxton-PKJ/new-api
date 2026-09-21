@@ -309,7 +309,7 @@ func getTokenAutoGroupsColumnType(t *testing.T, db *gorm.DB, dialect string) str
 	}
 }
 
-func getTokenModelMappingColumn(t *testing.T, db *gorm.DB, dialect string) (string, bool) {
+func getTokenNullableTextColumn(t *testing.T, db *gorm.DB, dialect string, column string) (string, bool) {
 	t.Helper()
 
 	switch dialect {
@@ -318,20 +318,20 @@ func getTokenModelMappingColumn(t *testing.T, db *gorm.DB, dialect string) (stri
 		if err := db.Raw("PRAGMA table_info(tokens)").Scan(&columns).Error; err != nil {
 			t.Fatalf("failed to inspect sqlite tokens schema: %v", err)
 		}
-		for _, column := range columns {
-			if column.Name == "model_mapping" {
-				return strings.ToLower(column.Type), column.NotNull == 0
+		for _, info := range columns {
+			if info.Name == column {
+				return strings.ToLower(info.Type), info.NotNull == 0
 			}
 		}
-		t.Fatalf("column model_mapping not found in tokens schema")
+		t.Fatalf("column %s not found in tokens schema", column)
 		return "", false
 	case "mysql":
 		var dataType string
 		var isNullable string
 		if err := db.Raw(`SELECT DATA_TYPE, IS_NULLABLE FROM information_schema.columns
 			WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
-			"tokens", "model_mapping").Row().Scan(&dataType, &isNullable); err != nil {
-			t.Fatalf("failed to inspect mysql token model_mapping column: %v", err)
+			"tokens", column).Row().Scan(&dataType, &isNullable); err != nil {
+			t.Fatalf("failed to inspect mysql token %s column: %v", column, err)
 		}
 		return strings.ToLower(dataType), strings.EqualFold(isNullable, "YES")
 	case "postgres":
@@ -339,8 +339,8 @@ func getTokenModelMappingColumn(t *testing.T, db *gorm.DB, dialect string) (stri
 		var isNullable string
 		if err := db.Raw(`SELECT data_type, is_nullable FROM information_schema.columns
 			WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`,
-			"tokens", "model_mapping").Row().Scan(&dataType, &isNullable); err != nil {
-			t.Fatalf("failed to inspect postgres token model_mapping column: %v", err)
+			"tokens", column).Row().Scan(&dataType, &isNullable); err != nil {
+			t.Fatalf("failed to inspect postgres token %s column: %v", column, err)
 		}
 		return strings.ToLower(dataType), strings.EqualFold(isNullable, "YES")
 	default:
@@ -396,11 +396,13 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 	if got := getTokenAutoGroupsColumnType(t, db, dialect); got != "text" {
 		t.Fatalf("expected migrated auto_groups column type text, got %q", got)
 	}
-	if !db.Migrator().HasColumn(&model.Token{}, "model_mapping") {
-		t.Fatal("expected migration to add model_mapping column")
-	}
-	if columnType, nullable := getTokenModelMappingColumn(t, db, dialect); columnType != "text" || !nullable {
-		t.Fatalf("expected migrated model_mapping column to be nullable text, got type %q nullable %v", columnType, nullable)
+	for _, column := range []string{"model_mapping", "profiles"} {
+		if !db.Migrator().HasColumn(&model.Token{}, column) {
+			t.Fatalf("expected migration to add %s column", column)
+		}
+		if columnType, nullable := getTokenNullableTextColumn(t, db, dialect, column); columnType != "text" || !nullable {
+			t.Fatalf("expected migrated %s column to be nullable text, got type %q nullable %v", column, columnType, nullable)
+		}
 	}
 
 	var migratedToken model.Token
@@ -419,8 +421,12 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 	if migratedToken.ModelMapping != nil {
 		t.Fatalf("expected legacy token model mapping to stay NULL, got %q", *migratedToken.ModelMapping)
 	}
+	if migratedToken.Profiles != nil {
+		t.Fatalf("expected legacy token profiles to stay NULL, got %q", *migratedToken.Profiles)
+	}
 
 	modelMapping := `{"claude-opus-4-8":"dsv4f"}`
+	profiles := `{"active_profile":"p","profiles":[{"name":"p"}]}`
 	inserted := model.Token{
 		UserId:             8,
 		Name:               "long-token",
@@ -434,6 +440,7 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 		ModelLimitsEnabled: false,
 		ModelLimits:        "",
 		ModelMapping:       common.GetPointer(modelMapping),
+		Profiles:           common.GetPointer(profiles),
 		AllowIps:           common.GetPointer(""),
 		UsedQuota:          0,
 		Group:              "default",
@@ -452,6 +459,9 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 	}
 	if fetched.ModelMapping == nil || *fetched.ModelMapping != modelMapping {
 		t.Fatalf("expected long token model mapping %q, got %v", modelMapping, fetched.ModelMapping)
+	}
+	if fetched.Profiles == nil || *fetched.Profiles != profiles {
+		t.Fatalf("expected long token profiles %q, got %v", profiles, fetched.Profiles)
 	}
 }
 
