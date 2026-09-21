@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -31,6 +32,10 @@ type RequestPolicySnapshot struct {
 	TextKeywords    []string
 	AutoDisable     bool
 	Options         map[string]string
+	// DefaultSameChannelRetryTimes and MaxTotalAttempts are the relay-attempt
+	// budget globals, mirrored into the common.* runtime values on every write.
+	DefaultSameChannelRetryTimes int
+	MaxTotalAttempts             int
 }
 
 var requestPolicySnapshot atomic.Pointer[RequestPolicySnapshot]
@@ -52,6 +57,8 @@ func requestPolicyDefaultOptions() map[string]string {
 		}
 	}
 	defaults["RetryTimes"] = strconv.Itoa(common.RetryTimes)
+	defaults["DefaultSameChannelRetryTimes"] = strconv.Itoa(common.DefaultSameChannelRetryTimes)
+	defaults["MaxTotalAttempts"] = strconv.Itoa(common.MaxTotalAttempts)
 	defaults["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
 	defaults["AutomaticDisableStatusCodes"] = operation_setting.AutomaticDisableStatusCodesToString()
 	defaults["AutomaticDisableKeywords"] = operation_setting.AutomaticDisableKeywordsToString()
@@ -69,7 +76,7 @@ func IsRequestPolicyOption(key string) bool {
 		return true
 	}
 	switch key {
-	case "CheckSensitiveEnabled", "CheckSensitiveOnPromptEnabled", "SensitiveWords", "AutomaticEnableChannelEnabled", "ChannelDisableThreshold", "monitor_setting.auto_test_channel_enabled", "monitor_setting.auto_test_channel_minutes", "monitor_setting.channel_test_concurrency", "monitor_setting.channel_test_mode", "RetryTimes", "AutomaticRetryStatusCodes", "AutomaticDisableChannelEnabled", "AutomaticDisableStatusCodes", "AutomaticDisableKeywords":
+	case "CheckSensitiveEnabled", "CheckSensitiveOnPromptEnabled", "SensitiveWords", "AutomaticEnableChannelEnabled", "ChannelDisableThreshold", "monitor_setting.auto_test_channel_enabled", "monitor_setting.auto_test_channel_minutes", "monitor_setting.channel_test_concurrency", "monitor_setting.channel_test_mode", "RetryTimes", "DefaultSameChannelRetryTimes", "MaxTotalAttempts", "AutomaticRetryStatusCodes", "AutomaticDisableChannelEnabled", "AutomaticDisableStatusCodes", "AutomaticDisableKeywords":
 		return true
 	}
 	return false
@@ -129,6 +136,14 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	snapshot.RetryTimes, err = strconv.Atoi(raw["RetryTimes"])
 	if err != nil || snapshot.RetryTimes < 0 || snapshot.RetryTimes == math.MaxInt {
 		return nil, fmt.Errorf("retry times must be a non-negative integer with room for the initial attempt")
+	}
+	snapshot.DefaultSameChannelRetryTimes, err = strconv.Atoi(raw["DefaultSameChannelRetryTimes"])
+	if err != nil || snapshot.DefaultSameChannelRetryTimes < 0 || snapshot.DefaultSameChannelRetryTimes > dto.MaxSameChannelRetryTimes {
+		return nil, fmt.Errorf("default same-channel retry times must be an integer between 0 and %d", dto.MaxSameChannelRetryTimes)
+	}
+	snapshot.MaxTotalAttempts, err = strconv.Atoi(raw["MaxTotalAttempts"])
+	if err != nil || snapshot.MaxTotalAttempts < 0 || snapshot.MaxTotalAttempts > 999 {
+		return nil, fmt.Errorf("max total attempts must be an integer between 0 and 999")
 	}
 	snapshot.AutoDisable, err = strconv.ParseBool(raw["AutomaticDisableChannelEnabled"])
 	if err != nil {

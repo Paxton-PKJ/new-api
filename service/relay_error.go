@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
@@ -21,6 +22,11 @@ import (
 func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) PolicyDecision {
 	if err == nil {
 		return PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}
+	}
+	// The total attempt fuse is a hard cap, so it precedes the channel errors
+	// that would otherwise retry regardless of any budget.
+	if common.MaxTotalAttempts > 0 && RequestPolicy(c).Attempts >= common.MaxTotalAttempts {
+		return PolicyDecision{Action: "stop", Reason: "max_total_attempts", Source: "global"}
 	}
 	if ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		source := RequestPolicy(c).SessionModeSource
@@ -59,6 +65,63 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 
 func ShouldRetryRelayError(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
 	return DecideRelayRetry(c, openaiErr, retryTimes).Action == "retry"
+}
+
+// SameChannelRetryBudget resolves the in-place retry budget for the selected
+// channel: the channel setting when present, otherwise the global default.
+func SameChannelRetryBudget(setting kitdto.ChannelSettings) int {
+	budget := common.DefaultSameChannelRetryTimes
+	if setting.SameChannelRetryTimes != nil {
+		budget = *setting.SameChannelRetryTimes
+	}
+	return min(max(budget, 0), kitdto.MaxSameChannelRetryTimes)
+}
+
+// DecideSameChannelRetry decides whether the failed attempt may be repeated on
+// the same channel without touching channel selection state. A stop decision is
+// not recorded: the caller falls back to DecideRelayRetry with the same error.
+func DecideSameChannelRetry(c *gin.Context, info *relaycommon.RelayInfo, err *types.NewAPIError, attempt, budget int) PolicyDecision {
+	if err == nil {
+		return PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}
+	}
+	if attempt >= budget {
+		return PolicyDecision{Action: "stop", Reason: "same_channel_budget_exhausted", Source: "channel"}
+	}
+	if common.MaxTotalAttempts > 0 && RequestPolicy(c).Attempts >= common.MaxTotalAttempts {
+		return PolicyDecision{Action: "stop", Reason: "max_total_attempts", Source: "global"}
+	}
+	if c.Request != nil && c.Request.Context().Err() != nil {
+		return PolicyDecision{Action: "stop", Reason: "request_cancelled", Source: "channel"}
+	}
+	// Any byte already handed to the client (headers, SSE, ping, hijack) makes
+	// a second upstream call unobservable, so only untouched responses retry.
+	if c.Writer.Written() {
+		return PolicyDecision{Action: "stop", Reason: "response_started", Source: "channel"}
+	}
+	if info != nil && info.RelayFormat == types.RelayFormatOpenAIRealtime {
+		return PolicyDecision{Action: "stop", Reason: "realtime_unsupported", Source: "channel"}
+	}
+	if types.IsSkipRetryError(err) {
+		return PolicyDecision{Action: "stop", Reason: "non_retryable_error", Source: "channel"}
+	}
+	if types.IsChannelError(err) {
+		return PolicyDecision{Action: "stop", Reason: "channel_error", Source: "channel"}
+	}
+	if ShouldDisableChannel(err) {
+		return PolicyDecision{Action: "stop", Reason: "channel_disable_requested", Source: "channel"}
+	}
+	if GetChannelConstraints(c).SuppressesRetry() {
+		return PolicyDecision{Action: "stop", Reason: "pinned_channel", Source: "channel"}
+	}
+	if code := err.StatusCode; code >= 100 && code <= 599 {
+		retryable := !(code >= 200 && code < 300) &&
+			!operation_setting.IsAlwaysSkipRetryCode(err.GetErrorCode()) &&
+			operation_setting.ShouldRetryByStatusCode(code)
+		if !retryable {
+			return PolicyDecision{Action: "stop", Reason: "status_not_retryable", Source: "channel"}
+		}
+	}
+	return PolicyDecision{Action: "retry", Reason: "same_channel_retry", Source: "channel"}
 }
 
 func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {

@@ -92,11 +92,28 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			loadOptionsFromDatabase()
 			assert.Equal(t, "strict", CurrentRequestPolicy().Affinity.SessionMode)
 			assert.Equal(t, rules, CurrentRequestPolicy().Options["channel_affinity_setting.rules"], "a global mode never rewrites rule fields")
+			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"DefaultSameChannelRetryTimes": "2", "MaxTotalAttempts": "8"}))
+			assert.Equal(t, 2, CurrentRequestPolicy().DefaultSameChannelRetryTimes)
+			assert.Equal(t, 2, common.DefaultSameChannelRetryTimes, "the runtime global follows the same write")
+			assert.Equal(t, 8, CurrentRequestPolicy().MaxTotalAttempts)
+			assert.Equal(t, 8, common.MaxTotalAttempts, "the runtime global follows the same write")
+			loadOptionsFromDatabase()
+			loadOptionsFromDatabase()
+			assert.Equal(t, 2, CurrentRequestPolicy().DefaultSameChannelRetryTimes, "the attempt budget survives reloads")
+			assert.Equal(t, 8, CurrentRequestPolicy().MaxTotalAttempts, "the attempt budget survives reloads")
 			snapshot := CurrentRequestPolicy()
 			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"channel_affinity_setting.session_mode": "unknown"}))
 			assert.Same(t, snapshot, CurrentRequestPolicy())
 			for _, value := range []string{"-1", "1.5", "bad", strconv.Itoa(math.MaxInt)} {
 				assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"RetryTimes": value}))
+				assert.Same(t, snapshot, CurrentRequestPolicy())
+			}
+			for _, value := range []string{"11", "-1", "x"} {
+				assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"DefaultSameChannelRetryTimes": value}))
+				assert.Same(t, snapshot, CurrentRequestPolicy())
+			}
+			for _, value := range []string{"1000", "-1", "x"} {
+				assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"MaxTotalAttempts": value}))
 				assert.Same(t, snapshot, CurrentRequestPolicy())
 			}
 			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"channel_affinity_setting.rules": "[", "RetryTimes": "8"}))

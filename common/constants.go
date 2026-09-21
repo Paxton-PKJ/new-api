@@ -136,6 +136,12 @@ var PreConsumedQuota = 500
 
 var RetryTimes = 0
 
+// DefaultSameChannelRetryTimes is the in-place retry budget for channels that do
+// not configure same_channel_retry_times. MaxTotalAttempts caps the upstream
+// attempts of one client request; 0 disables the fuse.
+var DefaultSameChannelRetryTimes = 0
+var MaxTotalAttempts = 0
+
 //var RootUserEmail = ""
 
 var IsMasterNode bool

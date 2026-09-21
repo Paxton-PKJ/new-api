@@ -56,8 +56,14 @@ type tokenMappingUpstream struct {
 	url string
 	mu  sync.Mutex
 	// calls holds the requests received since the last takeCalls.
-	calls      []tokenMappingUpstreamCall
-	failPrefix string
+	calls        []tokenMappingUpstreamCall
+	failPrefixes map[string]struct{}
+	// failFirstRemaining counts down the requests below a prefix that still
+	// answer 500; sseScripts holds the event scripts a prefix serves in order,
+	// repeating its last script once exhausted.
+	failFirstRemaining map[string]int
+	sseScripts         map[string][][]string
+	sseServed          map[string]int
 }
 
 func newTokenMappingUpstream(t *testing.T) *tokenMappingUpstream {
@@ -78,8 +84,42 @@ func (u *tokenMappingUpstream) serve(w http.ResponseWriter, r *http.Request) {
 	model := gjson.GetBytes(body, "model").String()
 	u.mu.Lock()
 	u.calls = append(u.calls, tokenMappingUpstreamCall{Path: r.URL.Path, Model: model, Body: body})
-	fail := u.failPrefix != "" && strings.HasPrefix(r.URL.Path, u.failPrefix)
+	fail := false
+	for prefix := range u.failPrefixes {
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			fail = true
+		}
+	}
+	for prefix, remaining := range u.failFirstRemaining {
+		if remaining > 0 && strings.HasPrefix(r.URL.Path, prefix) {
+			u.failFirstRemaining[prefix] = remaining - 1
+			fail = true
+		}
+	}
+	var script []string
+	for prefix, scripts := range u.sseScripts {
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			index := min(u.sseServed[prefix], len(scripts)-1)
+			u.sseServed[prefix]++
+			script = scripts[index]
+		}
+	}
 	u.mu.Unlock()
+
+	if script != nil {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for _, event := range script {
+			if _, err := io.WriteString(w, event); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if fail {
@@ -106,10 +146,37 @@ func (u *tokenMappingUpstream) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // failPath makes every request below prefix answer with 500 until it is cleared.
+// Several prefixes can be failed at once.
 func (u *tokenMappingUpstream) failPath(prefix string) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.failPrefix = prefix
+	if u.failPrefixes == nil {
+		u.failPrefixes = make(map[string]struct{})
+	}
+	u.failPrefixes[prefix] = struct{}{}
+}
+
+// failFirst makes the next times requests below prefix answer with 500 and
+// every later one succeed.
+func (u *tokenMappingUpstream) failFirst(prefix string, times int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.failFirstRemaining == nil {
+		u.failFirstRemaining = make(map[string]int)
+	}
+	u.failFirstRemaining[prefix] = times
+}
+
+// sseScript serves the event scripts below prefix in order, repeating the last
+// script for every later request.
+func (u *tokenMappingUpstream) sseScript(prefix string, scripts ...[]string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.sseScripts == nil {
+		u.sseScripts = make(map[string][][]string)
+		u.sseServed = make(map[string]int)
+	}
+	u.sseScripts[prefix] = scripts
 }
 
 // takeCalls returns and clears the requests received since the previous call.
@@ -229,9 +296,14 @@ func newTokenModelMappingFixture(t *testing.T) *tokenModelMappingFixture {
 
 func (f *tokenModelMappingFixture) insertChannel(t *testing.T, name, group, models, path string, mapping map[string]string) *model.Channel {
 	t.Helper()
+	return f.insertChannelOfType(t, constant.ChannelTypeOpenAI, name, group, models, path, mapping)
+}
+
+func (f *tokenModelMappingFixture) insertChannelOfType(t *testing.T, channelType int, name, group, models, path string, mapping map[string]string) *model.Channel {
+	t.Helper()
 	baseURL := f.upstream.url + path
 	channel := &model.Channel{
-		Name: name, Type: constant.ChannelTypeOpenAI, Key: "sk-mock",
+		Name: name, Type: channelType, Key: "sk-mock",
 		Status: common.ChannelStatusEnabled, Group: group, Models: models, BaseURL: &baseURL,
 	}
 	if len(mapping) > 0 {
@@ -260,7 +332,11 @@ func (f *tokenModelMappingFixture) insertToken(t *testing.T, name, key, group st
 
 func (f *tokenModelMappingFixture) postMessages(t *testing.T, token *model.Token, modelName string) *httptest.ResponseRecorder {
 	t.Helper()
-	body := fmt.Sprintf(`{"model":%q,"max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`, modelName)
+	return f.postMessagesBody(t, token, fmt.Sprintf(`{"model":%q,"max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`, modelName))
+}
+
+func (f *tokenModelMappingFixture) postMessagesBody(t *testing.T, token *model.Token, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("x-api-key", "sk-"+token.Key)
@@ -294,7 +370,12 @@ func (f *tokenModelMappingFixture) disableChannel(t *testing.T, channel *model.C
 
 func (f *tokenModelMappingFixture) enablePassThroughBody(t *testing.T, channel *model.Channel) {
 	t.Helper()
-	channel.SetSetting(dto.ChannelSettings{PassThroughBodyEnabled: true})
+	f.setChannelSetting(t, channel, dto.ChannelSettings{PassThroughBodyEnabled: true})
+}
+
+func (f *tokenModelMappingFixture) setChannelSetting(t *testing.T, channel *model.Channel, setting dto.ChannelSettings) {
+	t.Helper()
+	channel.SetSetting(setting)
 	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).
 		Update("setting", *channel.Setting).Error)
 }

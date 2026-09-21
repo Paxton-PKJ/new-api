@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -126,6 +128,8 @@ func TestProcessChannelErrorMasksDisableReasonAndNotification(t *testing.T) {
 }
 
 func TestDecideRelayRetryReasons(t *testing.T) {
+	previousMaxTotalAttempts := common.MaxTotalAttempts
+	t.Cleanup(func() { common.MaxTotalAttempts = previousMaxTotalAttempts })
 	upstream := func(status int) *types.NewAPIError {
 		return types.NewOpenAIError(errors.New("upstream"), types.ErrorCodeBadResponseStatusCode, status)
 	}
@@ -151,6 +155,10 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 			RequestPolicy(c).SessionModeSource = "global"
 		}, want: PolicyDecision{Action: "stop", Reason: "strict_session", Source: "global"}},
 		{name: "nil error", retries: 1, want: PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}},
+		{name: "max total attempts reached", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), retries: 1, setup: func(c *gin.Context) {
+			common.MaxTotalAttempts = 2
+			RequestPolicy(c).Attempts = 2
+		}, want: PolicyDecision{Action: "stop", Reason: "max_total_attempts", Source: "global"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -160,6 +168,86 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 			decision := DecideRelayRetry(c, tc.err, tc.retries)
 			assert.Equal(t, tc.want, decision)
 			assert.Equal(t, tc.want.Action == "retry", ShouldRetryRelayError(c, tc.err, tc.retries))
+		})
+	}
+}
+
+func TestSameChannelRetryBudget(t *testing.T) {
+	previous := common.DefaultSameChannelRetryTimes
+	t.Cleanup(func() { common.DefaultSameChannelRetryTimes = previous })
+	common.DefaultSameChannelRetryTimes = 4
+
+	assert.Equal(t, 4, SameChannelRetryBudget(kitdto.ChannelSettings{}), "an unset channel setting inherits the global default")
+	assert.Equal(t, 0, SameChannelRetryBudget(kitdto.ChannelSettings{SameChannelRetryTimes: common.GetPointer(0)}), "an explicit zero disables in-place retries")
+	assert.Equal(t, 3, SameChannelRetryBudget(kitdto.ChannelSettings{SameChannelRetryTimes: common.GetPointer(3)}))
+	assert.Equal(t, kitdto.MaxSameChannelRetryTimes, SameChannelRetryBudget(kitdto.ChannelSettings{SameChannelRetryTimes: common.GetPointer(99)}), "an oversized budget is clamped")
+	assert.Equal(t, 0, SameChannelRetryBudget(kitdto.ChannelSettings{SameChannelRetryTimes: common.GetPointer(-3)}), "a negative budget is clamped")
+}
+
+func TestDecideSameChannelRetry(t *testing.T) {
+	previousAutoDisable, previousMaxTotalAttempts := common.AutomaticDisableChannelEnabled, common.MaxTotalAttempts
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled, common.MaxTotalAttempts = previousAutoDisable, previousMaxTotalAttempts
+	})
+	upstream := func(status int) *types.NewAPIError {
+		return types.NewOpenAIError(errors.New("upstream"), types.ErrorCodeBadResponseStatusCode, status)
+	}
+	retry := PolicyDecision{Action: "retry", Reason: "same_channel_retry", Source: "channel"}
+	stop := func(reason string) PolicyDecision {
+		return PolicyDecision{Action: "stop", Reason: reason, Source: "channel"}
+	}
+	for _, tc := range []struct {
+		name    string
+		err     *types.NewAPIError
+		info    *relaycommon.RelayInfo
+		attempt int
+		budget  int
+		setup   func(*gin.Context)
+		want    PolicyDecision
+	}{
+		{name: "server error", err: upstream(http.StatusInternalServerError), budget: 1, want: retry},
+		{name: "too many requests", err: upstream(http.StatusTooManyRequests), budget: 1, want: retry},
+		{name: "unrecognized status code", err: upstream(0), budget: 1, want: retry},
+		{name: "transport failure", err: types.NewError(errors.New("dial"), types.ErrorCodeDoRequestFailed), budget: 1, want: retry},
+		{name: "budget zero", err: upstream(http.StatusInternalServerError), budget: 0, want: stop("same_channel_budget_exhausted")},
+		{name: "budget spent", err: upstream(http.StatusInternalServerError), attempt: 2, budget: 2, want: stop("same_channel_budget_exhausted")},
+		{name: "max total attempts reached", err: upstream(http.StatusInternalServerError), budget: 1, setup: func(c *gin.Context) {
+			common.MaxTotalAttempts = 2
+			RequestPolicy(c).Attempts = 2
+		}, want: PolicyDecision{Action: "stop", Reason: "max_total_attempts", Source: "global"}},
+		{name: "status already written", err: upstream(http.StatusInternalServerError), budget: 1, setup: func(c *gin.Context) {
+			c.Writer.WriteHeaderNow()
+		}, want: stop("response_started")},
+		{name: "body byte already written", err: upstream(http.StatusInternalServerError), budget: 1, setup: func(c *gin.Context) {
+			_, err := c.Writer.Write([]byte("event: ping\n\n"))
+			require.NoError(t, err)
+		}, want: stop("response_started")},
+		{name: "realtime relay", err: upstream(http.StatusInternalServerError), info: &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAIRealtime}, budget: 1, want: stop("realtime_unsupported")},
+		{name: "skip retry error", err: types.NewErrorWithStatusCode(errors.New("local"), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry()), budget: 1, want: stop("non_retryable_error")},
+		{name: "channel error", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), budget: 1, want: stop("channel_error")},
+		{name: "automatic disable requested", err: upstream(http.StatusUnauthorized), budget: 1, setup: func(*gin.Context) {
+			common.AutomaticDisableChannelEnabled = true
+		}, want: stop("channel_disable_requested")},
+		{name: "single attempt pin", err: upstream(http.StatusInternalServerError), budget: 1, setup: func(c *gin.Context) {
+			GetChannelConstraints(c).AddPin(dto.ChannelPin{ChannelId: 1, Source: dto.PinSourceToken, Rank: dto.PinRankToken, RetryMode: dto.PinRetrySingleAttempt})
+		}, want: stop("pinned_channel")},
+		{name: "client error", err: upstream(http.StatusBadRequest), budget: 1, want: stop("status_not_retryable")},
+		{name: "success status", err: upstream(http.StatusOK), budget: 1, want: stop("status_not_retryable")},
+		{name: "always skipped status", err: upstream(http.StatusGatewayTimeout), budget: 1, want: stop("status_not_retryable")},
+		{name: "request cancelled", err: upstream(http.StatusInternalServerError), budget: 1, setup: func(c *gin.Context) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+		}, want: stop("request_cancelled")},
+		{name: "no error", budget: 1, want: PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			if tc.setup != nil {
+				tc.setup(c)
+			}
+			assert.Equal(t, tc.want, DecideSameChannelRetry(c, tc.info, tc.err, tc.attempt, tc.budget))
 		})
 	}
 }

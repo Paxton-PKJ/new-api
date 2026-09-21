@@ -698,6 +698,44 @@ func TestChannelSettingsHTTPTransportJSONRoundTrip(t *testing.T) {
 	assert.NotContains(t, string(encoded), "http_protocol")
 }
 
+func TestChannelSettingsSameChannelRetryJSONRoundTrip(t *testing.T) {
+	zero := 0
+	legacy := `{"proxy":"http://127.0.0.1:8080","http_protocol":"auto"}`
+	var settings ChannelSettings
+	require.NoError(t, json.Unmarshal([]byte(legacy), &settings))
+	assert.Nil(t, settings.SameChannelRetryTimes, "a channel saved before the setting exists inherits the global default")
+
+	encoded, err := json.Marshal(settings)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "same_channel_retry_times")
+
+	disabled := ChannelSettings{SameChannelRetryTimes: &zero}
+	encoded, err = json.Marshal(disabled)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"same_channel_retry_times":0`)
+
+	var decoded ChannelSettings
+	require.NoError(t, json.Unmarshal([]byte(`{"same_channel_retry_times":3}`), &decoded))
+	require.NotNil(t, decoded.SameChannelRetryTimes)
+	assert.Equal(t, 3, *decoded.SameChannelRetryTimes)
+}
+
+func TestChannelSettingsValidateSameChannelRetry(t *testing.T) {
+	zero, maximum, negative, tooLarge := 0, MaxSameChannelRetryTimes, -1, MaxSameChannelRetryTimes+1
+	require.NoError(t, (*ChannelSettings)(nil).ValidateSameChannelRetry())
+	require.NoError(t, (&ChannelSettings{}).ValidateSameChannelRetry())
+	require.NoError(t, (&ChannelSettings{SameChannelRetryTimes: &zero}).ValidateSameChannelRetry())
+	require.NoError(t, (&ChannelSettings{SameChannelRetryTimes: &maximum}).ValidateSameChannelRetry())
+
+	err := (&ChannelSettings{SameChannelRetryTimes: &negative}).ValidateSameChannelRetry()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "same_channel_retry_times")
+
+	err = (&ChannelSettings{SameChannelRetryTimes: &tooLarge}).ValidateSameChannelRetry()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "same_channel_retry_times")
+}
+
 func TestChannelSettingsValidateHTTPTransport(t *testing.T) {
 	require.NoError(t, (&ChannelSettings{}).ValidateHTTPTransport())
 	require.NoError(t, (&ChannelSettings{HTTPProtocol: "AUTO"}).ValidateHTTPTransport())

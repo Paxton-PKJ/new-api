@@ -22,6 +22,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -156,9 +157,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.LastError = nil
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
-		relayInfo.StreamStatus = nil
-		relayInfo.PerformanceBusinessRejection = false
-		relayInfo.PerformanceOutputTokens = 0
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
@@ -166,47 +164,82 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = channelErr
 			break
 		}
+		// The first selection of a request rebuilds the channel from the request
+		// context instead of the routing cache, so it carries no key and no base
+		// URL. Only a channel read from the cache can be re-applied in place.
+		reusableChannel := relayInfo.ChannelMeta != nil
 		service.AppendUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
 			break
 		}
 
-		bodyStorage, bodyErr := common.GetBodyStorage(c)
-		if bodyErr != nil {
-			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
-			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
-				newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
-			} else {
-				newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		// In-place attempts on the channel just selected: they reuse every piece
+		// of selection state (retry index, priorities, Auto group, affinity), so
+		// only the request body and the per-attempt relay info are reset here.
+		channelSetting, _ := common.GetContextKeyType[kitdto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+		sameChannelBudget := service.SameChannelRetryBudget(channelSetting)
+		var decision service.PolicyDecision
+		for sameChannelAttempt := 0; ; sameChannelAttempt++ {
+			relayInfo.StreamStatus = nil
+			relayInfo.PerformanceBusinessRejection = false
+			relayInfo.PerformanceOutputTokens = 0
+
+			bodyStorage, bodyErr := common.GetBodyStorage(c)
+			if bodyErr != nil {
+				// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
+				if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
+					newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
+				} else {
+					newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+				}
+				break
 			}
-			break
+			c.Request.Body = io.NopCloser(bodyStorage)
+
+			switch relayFormat {
+			case types.RelayFormatOpenAIRealtime:
+				newAPIError = relay.WssHelper(c, relayInfo)
+			case types.RelayFormatClaude:
+				newAPIError = relay.ClaudeHelper(c, relayInfo)
+			case types.RelayFormatGemini:
+				newAPIError = geminiRelayHandler(c, relayInfo)
+			default:
+				newAPIError = relayHandler(c, relayInfo)
+			}
+
+			if newAPIError == nil {
+				service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
+				relayInfo.LastError = nil
+				return
+			}
+
+			newAPIError = service.NormalizeViolationFeeError(newAPIError)
+			relayInfo.LastError = newAPIError
+
+			decision = service.DecideSameChannelRetry(c, relayInfo, newAPIError, sameChannelAttempt, sameChannelBudget)
+			if decision.Action != "retry" {
+				decision = service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
+			}
+			service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
+			processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
+
+			if decision.Reason != "same_channel_retry" {
+				break
+			}
+			// Refresh the channel context so multi-key channels rotate to their
+			// next key, then count the new attempt for the total-attempts fuse.
+			if reusableChannel {
+				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
+					newAPIError = setupErr
+					decision = service.PolicyDecision{Action: "stop", Reason: "channel_error", Source: "channel"}
+					break
+				}
+			}
+			service.RequestPolicy(c).BeginAttempt(channel, relayInfo.UsingGroup)
+			service.AppendUsedChannel(c, channel.Id)
+			logger.LogInfo(c, fmt.Sprintf("same-channel retry %d/%d on channel #%d", sameChannelAttempt+1, sameChannelBudget, channel.Id))
 		}
-		c.Request.Body = io.NopCloser(bodyStorage)
-
-		switch relayFormat {
-		case types.RelayFormatOpenAIRealtime:
-			newAPIError = relay.WssHelper(c, relayInfo)
-		case types.RelayFormatClaude:
-			newAPIError = relay.ClaudeHelper(c, relayInfo)
-		case types.RelayFormatGemini:
-			newAPIError = geminiRelayHandler(c, relayInfo)
-		default:
-			newAPIError = relayHandler(c, relayInfo)
-		}
-
-		if newAPIError == nil {
-			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
-			relayInfo.LastError = nil
-			return
-		}
-
-		newAPIError = service.NormalizeViolationFeeError(newAPIError)
-		relayInfo.LastError = newAPIError
-
-		decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
-		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
-		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
 		if decision.Action != "retry" {
 			break
@@ -797,6 +830,8 @@ func decideTaskRetry(c *gin.Context, taskErr *taskdto.TaskError, retryTimes int)
 		stop.Reason = "request_completed"
 	case taskErr.NoRetry:
 		stop.Reason = "task_accepted"
+	case common.MaxTotalAttempts > 0 && service.RequestPolicy(c).Attempts >= common.MaxTotalAttempts:
+		stop.Reason, stop.Source = "max_total_attempts", "global"
 	case service.ShouldSkipRetryAfterChannelAffinityFailure(c):
 		stop.Reason, stop.Source = "strict_session", "session_rule"
 		if source := service.RequestPolicy(c).SessionModeSource; source != "" {

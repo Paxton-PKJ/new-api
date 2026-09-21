@@ -32,6 +32,10 @@ type ChannelSettings struct {
 	// HTTP2ConnectionShards spreads HTTP/2 traffic across N independent transports
 	// (1-8). Zero/unset means 1. Ignored when HTTPProtocol is "http1".
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
+	// SameChannelRetryTimes is the number of extra in-place attempts on this
+	// channel after a retryable failure that reached the client with no bytes.
+	// nil inherits the global default, 0 disables, n allows n extra attempts.
+	SameChannelRetryTimes *int `json:"same_channel_retry_times,omitempty"`
 }
 
 // BindsTaskPlugin reports whether the channel is bound to the task plugin,
@@ -63,7 +67,19 @@ const (
 	HTTPProtocolAuto         = "auto"
 	HTTPProtocolHTTP1        = "http1"
 	MaxHTTP2ConnectionShards = 8
+	MaxSameChannelRetryTimes = 10
 )
+
+// ValidateSameChannelRetry validates the per-channel in-place retry budget.
+func (s *ChannelSettings) ValidateSameChannelRetry() error {
+	if s == nil || s.SameChannelRetryTimes == nil {
+		return nil
+	}
+	if *s.SameChannelRetryTimes < 0 || *s.SameChannelRetryTimes > MaxSameChannelRetryTimes {
+		return fmt.Errorf("invalid same_channel_retry_times: %d", *s.SameChannelRetryTimes)
+	}
+	return nil
+}
 
 // ValidateHTTPTransport validates save-time HTTP transport channel settings.
 func (s *ChannelSettings) ValidateHTTPTransport() error {

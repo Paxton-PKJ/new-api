@@ -33,6 +33,28 @@ func TestChannelValidateSettingsRejectsInvalidHTTPTransport(t *testing.T) {
 			setting: dto.ChannelSettings{HTTPProtocol: "http1", HTTP2ConnectionShards: 2},
 			wantErr: "http2_connection_shards",
 		},
+		{
+			name:    "unset same-channel retries",
+			setting: dto.ChannelSettings{},
+		},
+		{
+			name:    "disabled same-channel retries",
+			setting: dto.ChannelSettings{SameChannelRetryTimes: common.GetPointer(0)},
+		},
+		{
+			name:    "maximum same-channel retries",
+			setting: dto.ChannelSettings{SameChannelRetryTimes: common.GetPointer(dto.MaxSameChannelRetryTimes)},
+		},
+		{
+			name:    "negative same-channel retries rejected",
+			setting: dto.ChannelSettings{SameChannelRetryTimes: common.GetPointer(-1)},
+			wantErr: "same_channel_retry_times",
+		},
+		{
+			name:    "same-channel retries above the maximum rejected",
+			setting: dto.ChannelSettings{SameChannelRetryTimes: common.GetPointer(dto.MaxSameChannelRetryTimes + 1)},
+			wantErr: "same_channel_retry_times",
+		},
 	}
 
 	for _, tt := range tests {
