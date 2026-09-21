@@ -227,14 +227,17 @@ func TestSameChannelRetryEndToEnd(t *testing.T) {
 
 		response := fixture.postMessagesBody(t, token, sseMessagesBody)
 		assert.Contains(t, response.Body.String(), "hello", "the client keeps the bytes the failed attempt already sent")
-		assert.Equal(t, []string{"S", "S"}, upstreamSequence(t, fixture),
-			"the in-place budget is unused once bytes were written; the outer retry still repeats the channel")
+		assert.Equal(t, []string{"S"}, upstreamSequence(t, fixture),
+			"neither the in-place budget nor the outer retry may repeat a request whose response has started")
 
 		// The first attempt already wrote message_start and a delta, so the failed
-		// stream is never repeated in place: the recorded decisions stay with the
-		// existing retry rules even though the in-place budget allows two attempts.
-		reasons := policyReasons(policyDecisions(t, logOther(t, lastErrorLog(t, token))))
+		// stream is neither repeated in place (the in-place budget allows two
+		// attempts) nor by the outer retry.
+		decisions := policyDecisions(t, logOther(t, lastErrorLog(t, token)))
+		reasons := policyReasons(decisions)
 		assert.NotContains(t, reasons, "same_channel_retry", "a started response never retries in place: %v", reasons)
+		require.NotEmpty(t, decisions)
+		assert.Equal(t, map[string]any{"action": "stop", "reason": "response_started", "source": "system"}, decisions[len(decisions)-1])
 	})
 
 	t.Run("S-I7_first_event_error_is_retried_in_place", func(t *testing.T) {

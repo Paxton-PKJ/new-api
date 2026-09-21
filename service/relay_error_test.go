@@ -155,6 +155,20 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 			RequestPolicy(c).SessionModeSource = "global"
 		}, want: PolicyDecision{Action: "stop", Reason: "strict_session", Source: "global"}},
 		{name: "nil error", retries: 1, want: PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}},
+		{name: "response already started", err: upstream(http.StatusInternalServerError), retries: 1, setup: func(c *gin.Context) {
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			c.Writer.WriteHeaderNow()
+		}, want: PolicyDecision{Action: "stop", Reason: "response_started", Source: "system"}},
+		{name: "websocket relay ignores written state", err: upstream(http.StatusInternalServerError), retries: 1, setup: func(c *gin.Context) {
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/realtime", nil)
+			c.Request.Header.Set("Connection", "Upgrade")
+			c.Request.Header.Set("Upgrade", "websocket")
+			c.Writer.WriteHeaderNow()
+		}, want: PolicyDecision{Action: "retry", Reason: "retry_status_matched", Source: "global"}},
+		{name: "channel error after response started", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), retries: 1, setup: func(c *gin.Context) {
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			c.Writer.WriteHeaderNow()
+		}, want: PolicyDecision{Action: "stop", Reason: "response_started", Source: "system"}},
 		{name: "max total attempts reached", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), retries: 1, setup: func(c *gin.Context) {
 			common.MaxTotalAttempts = 2
 			RequestPolicy(c).Attempts = 2

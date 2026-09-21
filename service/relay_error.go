@@ -28,6 +28,13 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if common.MaxTotalAttempts > 0 && RequestPolicy(c).Attempts >= common.MaxTotalAttempts {
 		return PolicyDecision{Action: "stop", Reason: "max_total_attempts", Source: "global"}
 	}
+	// Bytes already handed to the client cannot be taken back: a further upstream
+	// attempt would append a second response to the one in flight. WebSocket
+	// relays are hijacked before their first attempt and keep their own framing,
+	// so they are exempt.
+	if c.Request != nil && !c.IsWebsocket() && c.Writer.Written() {
+		return PolicyDecision{Action: "stop", Reason: "response_started", Source: "system"}
+	}
 	if ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		source := RequestPolicy(c).SessionModeSource
 		if source == "" {
