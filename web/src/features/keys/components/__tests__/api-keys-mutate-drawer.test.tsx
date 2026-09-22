@@ -16,7 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import type { ApiKey } from '../../types'
@@ -86,6 +92,7 @@ const storedProfileApiKey: ApiKey = {
           {
             name: 'normal',
             auto_groups: ['vip'],
+            route_keys: [],
             cross_group_retry: true,
           },
         ],
@@ -97,6 +104,8 @@ const storedProfileApiKey: ApiKey = {
 type ApiFixtures = {
   updatedPayloads?: Array<Record<string, unknown>>
   storedRow?: ApiKey
+  directRouting?: { enabled: boolean; max_channels: number; allowed: boolean }
+  requestedUrls?: string[]
 }
 
 function installApiFixtures(
@@ -105,7 +114,29 @@ function installApiFixtures(
 ) {
   const updatedPayloads = fixtures.updatedPayloads ?? []
   apiClient.get = async (url) => {
+    fixtures.requestedUrls?.push(url)
     switch (url) {
+      case '/api/channel/route_options':
+        // Only reachable when the server reports direct routing as allowed;
+        // every other case fails loudly instead of hiding a stray request.
+        if (!fixtures.directRouting?.allowed) {
+          throw new Error('Unexpected route options request')
+        }
+        return {
+          data: {
+            success: true,
+            data: [
+              {
+                id: 12,
+                route_key: 'ch_AbCdEfGhIjKlMnOp',
+                name: 'Azure Prod',
+                type: 1,
+                status: 1,
+                tag: 'prod',
+              },
+            ],
+          },
+        }
       case '/api/status':
         return { data: { data: { default_use_auto_group: true } } }
       case '/api/user/models':
@@ -125,7 +156,13 @@ function installApiFixtures(
         return {
           data: {
             success: true,
-            data: { groups: ['vip', 'default'], max_count: 3 },
+            data: {
+              groups: ['vip', 'default'],
+              max_count: 3,
+              ...(fixtures.directRouting
+                ? { direct_routing: fixtures.directRouting }
+                : {}),
+            },
           },
         }
       case '/api/token/7':
@@ -150,7 +187,10 @@ function installApiFixtures(
   }
 }
 
-async function renderDrawer(currentRow?: ApiKey): Promise<void> {
+async function renderDrawer(
+  currentRow?: ApiKey,
+  directRouting?: { enabled: boolean; max_channels: number; allowed: boolean }
+): Promise<void> {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -181,7 +221,11 @@ async function renderDrawer(currentRow?: ApiKey): Promise<void> {
     ['token-auto-groups'],
     {
       success: true,
-      data: { groups: ['vip', 'default'], max_count: 3 },
+      data: {
+        groups: ['vip', 'default'],
+        max_count: 3,
+        ...(directRouting ? { direct_routing: directRouting } : {}),
+      },
     },
     { updatedAt: freshAt }
   )
@@ -488,5 +532,53 @@ describe('API keys mutate drawer routing profile integration', () => {
       await screen.findByText('Route presets require the auto group')
     ).toBeVisible()
     expect(updatedPayloads).toHaveLength(0)
+  })
+
+  test('never asks for the channel list when direct routing is unavailable', async () => {
+    const requestedUrls: string[] = []
+    installApiFixtures([], {
+      storedRow: storedProfileApiKey,
+      directRouting: { enabled: true, max_channels: 2, allowed: false },
+      requestedUrls,
+    })
+    await renderDrawer(storedProfileApiKey)
+
+    expect(requestedUrls).not.toContain('/api/channel/route_options')
+    expect(
+      screen.getByRole('button', { name: 'Channels' })
+    ).toBeDisabled()
+  })
+
+  test('offers the fetched channels for a direct route preset', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    const requestedUrls: string[] = []
+    installApiFixtures(createdPayloads, {
+      storedRow: storedProfileApiKey,
+      directRouting: { enabled: true, max_channels: 2, allowed: true },
+      requestedUrls,
+    })
+    await renderDrawer(
+      storedProfileApiKey,
+      { enabled: true, max_channels: 2, allowed: true }
+    )
+
+    expect(requestedUrls).toContain('/api/channel/route_options')
+
+    const preset = document.querySelector<HTMLElement>(
+      '[data-slot="route-preset"]'
+    )
+    if (!preset) throw new Error('Expected a stored route preset card')
+    fireEvent.click(
+      within(preset).getByRole('button', { name: 'Channels' })
+    )
+    fireEvent.click(within(preset).getByRole('combobox'))
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="command-item"]'),
+    ].find((candidate) => candidate.textContent?.includes('Azure Prod'))
+    if (!option) throw new Error('Expected the fetched channel candidate')
+    fireEvent.click(option)
+
+    expect(within(preset).getByText('Azure Prod')).toBeVisible()
+    expect(preset).toHaveTextContent('1 / 2 channels selected')
   })
 })

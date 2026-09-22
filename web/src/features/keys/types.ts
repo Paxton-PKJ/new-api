@@ -25,6 +25,7 @@ import { z } from 'zod'
 export const tokenRoutePresetSchema = z.object({
   name: z.string(),
   auto_groups: z.array(z.string()).default([]),
+  route_keys: z.array(z.string()).default([]),
   cross_group_retry: z.boolean().optional().default(false),
 })
 
@@ -44,6 +45,30 @@ export const tokenProfileConfigSchema = z.object({
 export type TokenRoutePreset = z.infer<typeof tokenRoutePresetSchema>
 export type TokenProfile = z.infer<typeof tokenProfileSchema>
 export type TokenProfileConfig = z.infer<typeof tokenProfileConfigSchema>
+
+/**
+ * Route preset as sent to the server: exactly one of `auto_groups` and
+ * `route_keys` is present, and the unused list is omitted rather than empty.
+ */
+export type TokenRoutePresetPayload = Omit<
+  TokenRoutePreset,
+  'auto_groups' | 'route_keys'
+> & {
+  auto_groups?: string[]
+  route_keys?: string[]
+}
+
+/** Routing profile document as sent to the server. */
+export type TokenProfileConfigPayload = Omit<
+  TokenProfileConfig,
+  'profiles'
+> & {
+  profiles: Array<
+    Omit<TokenProfile, 'route_presets'> & {
+      route_presets?: TokenRoutePresetPayload[]
+    }
+  >
+}
 
 export const apiKeySchema = z.object({
   id: z.number(),
@@ -121,12 +146,18 @@ export interface ApiKeyFormData {
   auto_groups: string[]
   cross_group_retry: boolean
   /** Stored routing profile document; `null` clears it. */
-  profiles: TokenProfileConfig | null
+  profiles: TokenProfileConfigPayload | null
 }
 
 export interface TokenAutoGroupsConfig {
   groups: string[]
   max_count: number
+  /** Direct channel routing availability. Absent on older servers. */
+  direct_routing?: {
+    enabled: boolean
+    max_channels: number
+    allowed: boolean
+  }
 }
 
 // ============================================================================

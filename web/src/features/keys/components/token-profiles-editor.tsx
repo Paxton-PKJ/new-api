@@ -41,17 +41,22 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { ModelMappingEditor } from '@/features/channels/components/model-mapping-editor'
+import type { ChannelRouteOption } from '@/features/channels/types'
 import { cn } from '@/lib/utils'
 
 import {
   MAX_ROUTE_PRESETS,
   MAX_ROUTING_PROFILES,
+  type DirectRoutingLimits,
+  type RoutePresetMode,
   type TokenProfileFormValues,
   type TokenRoutePresetFormValues,
 } from '../lib'
 import type { ApiKeyGroupOption } from './api-key-group-combobox'
 import { AutoGroupOrderEditor } from './auto-group-order-editor'
+import { RouteChannelOrderEditor } from './route-channel-order-editor'
 
 /** Reads a React Hook Form error message from an arbitrarily shaped error node. */
 function readFieldMessage(node: unknown): string | undefined {
@@ -98,6 +103,9 @@ type TokenProfileCardProps = {
   groupOptions: ApiKeyGroupOption[]
   maxAutoGroups: number
   groupIsAuto: boolean
+  directRouting: DirectRoutingLimits
+  channelOptions: ChannelRouteOption[]
+  channelOptionsLoaded: boolean
   disabled?: boolean
   error: unknown
 }
@@ -109,6 +117,18 @@ function TokenProfileCard(props: TokenProfileCardProps) {
   const profile = props.profile
   const presets = profile.route_presets
   const namedPresets = presets.filter((preset) => preset.name.trim())
+  const channelsAvailable =
+    props.directRouting.enabled && props.directRouting.allowed
+  let channelsUnavailableReason: string | undefined
+  if (!props.directRouting.enabled) {
+    channelsUnavailableReason = t(
+      'Direct channel routing is disabled on this instance'
+    )
+  } else if (!props.directRouting.allowed) {
+    channelsUnavailableReason = t(
+      'Only administrators can configure direct route presets'
+    )
+  }
 
   const updatePreset = (id: string, next: TokenRoutePresetFormValues) => {
     const previous = presets.find((preset) => preset.id === id)
@@ -149,10 +169,27 @@ function TokenProfileCard(props: TokenProfileCardProps) {
             'preset',
             presets.map((preset) => preset.name)
           ),
+          mode: 'groups',
           auto_groups: [],
+          route_keys: [],
           cross_group_retry: true,
         },
       ],
+    })
+  }
+
+  const switchPresetMode = (
+    preset: TokenRoutePresetFormValues,
+    mode: RoutePresetMode
+  ) => {
+    if (mode === preset.mode) return
+    updatePreset(preset.id, {
+      ...preset,
+      mode,
+      // Each preset keeps exactly one selection style, so switching clears the
+      // list the new mode does not use.
+      auto_groups: mode === 'groups' ? preset.auto_groups : [],
+      route_keys: mode === 'channels' ? preset.route_keys : [],
     })
   }
 
@@ -319,32 +356,83 @@ function TokenProfileCard(props: TokenProfileCardProps) {
                         <Trash2 aria-hidden='true' className='size-4' />
                       </Button>
                     </div>
-                    <AutoGroupOrderEditor
-                      value={preset.auto_groups}
-                      mode='custom'
-                      options={props.groupOptions}
-                      globalOptions={[]}
-                      maxCount={props.maxAutoGroups}
-                      allowInherit={false}
-                      onChange={(value) =>
-                        updatePreset(preset.id, {
-                          ...preset,
-                          auto_groups: value.groups.slice(
-                            0,
-                            props.maxAutoGroups
-                          ),
-                        })
-                      }
-                    />
+                    <div className='flex flex-wrap items-center gap-2'>
+                      <ToggleGroup
+                        value={[preset.mode]}
+                        onValueChange={(values) => {
+                          const mode = values[0]
+                          if (mode !== 'groups' && mode !== 'channels') return
+                          switchPresetMode(preset, mode)
+                        }}
+                        variant='outline'
+                        size='sm'
+                        aria-label={t('Preset mode')}
+                      >
+                        <ToggleGroupItem
+                          value='groups'
+                          disabled={props.disabled}
+                        >
+                          {t('Groups')}
+                        </ToggleGroupItem>
+                        <ToggleGroupItem
+                          value='channels'
+                          disabled={props.disabled || !channelsAvailable}
+                        >
+                          {t('Channels')}
+                        </ToggleGroupItem>
+                      </ToggleGroup>
+                      {channelsUnavailableReason ? (
+                        <span className='text-muted-foreground text-xs'>
+                          {channelsUnavailableReason}
+                        </span>
+                      ) : null}
+                    </div>
+                    {preset.mode === 'channels' ? (
+                      <RouteChannelOrderEditor
+                        value={preset.route_keys}
+                        options={props.channelOptions}
+                        optionsLoaded={props.channelOptionsLoaded}
+                        maxCount={props.directRouting.maxChannels}
+                        disabled={props.disabled}
+                        onChange={(routeKeys) =>
+                          updatePreset(preset.id, {
+                            ...preset,
+                            route_keys: routeKeys,
+                          })
+                        }
+                      />
+                    ) : (
+                      <AutoGroupOrderEditor
+                        value={preset.auto_groups}
+                        mode='custom'
+                        options={props.groupOptions}
+                        globalOptions={[]}
+                        maxCount={props.maxAutoGroups}
+                        allowInherit={false}
+                        onChange={(value) =>
+                          updatePreset(preset.id, {
+                            ...preset,
+                            auto_groups: value.groups.slice(
+                              0,
+                              props.maxAutoGroups
+                            ),
+                          })
+                        }
+                      />
+                    )}
                     <div className='flex items-center justify-between gap-3'>
                       <div className='flex flex-col gap-0.5'>
                         <Label className='text-xs'>
                           {t('Cross-group retry')}
                         </Label>
                         <p className='text-muted-foreground text-xs'>
-                          {t(
-                            'When enabled, if channels in the current group fail, it will try channels in the next group in order.'
-                          )}
+                          {preset.mode === 'channels'
+                            ? t(
+                                'When enabled, if the current channel fails, the next channel in the list is tried in order.'
+                              )
+                            : t(
+                                'When enabled, if channels in the current group fail, it will try channels in the next group in order.'
+                              )}
                         </p>
                       </div>
                       <Switch
@@ -454,6 +542,9 @@ export type TokenProfilesEditorProps = {
   groupOptions: ApiKeyGroupOption[]
   maxAutoGroups: number
   groupIsAuto: boolean
+  directRouting: DirectRoutingLimits
+  channelOptions: ChannelRouteOption[]
+  channelOptionsLoaded: boolean
   disabled?: boolean
   /** React Hook Form error node of the `profiles` field. */
   errors?: unknown
@@ -594,6 +685,9 @@ export function TokenProfilesEditor(props: TokenProfilesEditorProps) {
           groupOptions={props.groupOptions}
           maxAutoGroups={props.maxAutoGroups}
           groupIsAuto={props.groupIsAuto}
+          directRouting={props.directRouting}
+          channelOptions={props.channelOptions}
+          channelOptionsLoaded={props.channelOptionsLoaded}
           disabled={props.disabled}
           error={readFieldChild(props.errors, index)}
         />

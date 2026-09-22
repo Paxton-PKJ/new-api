@@ -44,11 +44,15 @@ function preset(
   return {
     id: 'preset-1',
     name: 'normal',
+    mode: 'groups',
     auto_groups: ['vip'],
+    route_keys: [],
     cross_group_retry: true,
     ...overrides,
   }
 }
+
+const DIRECT_ROUTING = { enabled: true, allowed: true, maxChannels: 2 }
 
 function profile(
   overrides: Partial<TokenProfileFormValues> = {}
@@ -64,8 +68,11 @@ function profile(
   }
 }
 
-function parseProfiles(overrides: Record<string, unknown>) {
-  return getApiKeyFormSchema(t, MAX_AUTO_GROUPS).safeParse({
+function parseProfiles(
+  overrides: Record<string, unknown>,
+  directRouting = DIRECT_ROUTING
+) {
+  return getApiKeyFormSchema(t, MAX_AUTO_GROUPS, directRouting).safeParse({
     ...getApiKeyFormDefaultValues(true),
     name: 'routed key',
     ...overrides,
@@ -235,6 +242,104 @@ describe('API key routing profile form schema', () => {
     )
   })
 
+  test('accepts a direct route preset within the instance cap', () => {
+    const result = parseProfiles({
+      profiles: [
+        profile({
+          route_presets: [
+            preset({
+              mode: 'channels',
+              auto_groups: [],
+              route_keys: ['ch_AbCdEfGhIjKlMnOp', 'ch_QqRrSsTtUuVvWwXx'],
+            }),
+          ],
+        }),
+      ],
+    })
+
+    expect(result.success).toBe(true)
+  })
+
+  test('requires at least one channel for a direct route preset', () => {
+    expectIssue(
+      parseProfiles({
+        profiles: [
+          profile({
+            route_presets: [preset({ mode: 'channels', auto_groups: [] })],
+          }),
+        ],
+      }),
+      ['profiles', 0, 'route_presets', 0, 'route_keys'],
+      'Select at least one channel for this route preset'
+    )
+  })
+
+  test('rejects more channels than the instance cap and duplicate channels', () => {
+    expectIssue(
+      parseProfiles({
+        profiles: [
+          profile({
+            route_presets: [
+              preset({
+                mode: 'channels',
+                auto_groups: [],
+                route_keys: ['ch_a', 'ch_b', 'ch_c'],
+              }),
+            ],
+          }),
+        ],
+      }),
+      ['profiles', 0, 'route_presets', 0, 'route_keys'],
+      'Select at most 2 channels'
+    )
+    expectIssue(
+      parseProfiles({
+        profiles: [
+          profile({
+            route_presets: [
+              preset({
+                mode: 'channels',
+                auto_groups: [],
+                route_keys: ['ch_a', 'ch_a'],
+              }),
+            ],
+          }),
+        ],
+      }),
+      ['profiles', 0, 'route_presets', 0, 'route_keys'],
+      'Channels must not contain duplicates'
+    )
+  })
+
+  test('rejects direct presets while the instance disables or restricts them', () => {
+    const directPreset = preset({
+      mode: 'channels',
+      auto_groups: [],
+      route_keys: ['ch_a'],
+    })
+
+    expectIssue(
+      parseProfiles(
+        {
+          profiles: [profile({ route_presets: [directPreset] })],
+        },
+        { enabled: false, allowed: true, maxChannels: 2 }
+      ),
+      ['profiles', 0, 'route_presets', 0, 'route_keys'],
+      'Direct channel routing is disabled on this instance'
+    )
+    expectIssue(
+      parseProfiles(
+        {
+          profiles: [profile({ route_presets: [directPreset] })],
+        },
+        { enabled: true, allowed: false, maxChannels: 2 }
+      ),
+      ['profiles', 0, 'route_presets', 0, 'route_keys'],
+      'Only administrators can configure direct route presets'
+    )
+  })
+
   test('enforces the profile and route preset counts', () => {
     expectIssue(
       parseProfiles({
@@ -324,6 +429,39 @@ describe('API key routing profile payload mapping', () => {
 
     expect(payload.profiles).toEqual({ profiles: [{ name: 'dsv4f' }] })
   })
+
+  test('sends route keys for a direct preset and no Auto groups', () => {
+    const payload = transformFormDataToPayload({
+      ...getApiKeyFormDefaultValues(true),
+      name: 'routed key',
+      profiles: [
+        profile({
+          route_presets: [
+            preset({
+              mode: 'channels',
+              auto_groups: [],
+              route_keys: ['ch_AbCdEfGhIjKlMnOp', 'ch_QqRrSsTtUuVvWwXx'],
+            }),
+          ],
+        }),
+      ],
+    })
+
+    expect(payload.profiles).toEqual({
+      profiles: [
+        {
+          name: 'dsv4f',
+          route_presets: [
+            {
+              name: 'normal',
+              route_keys: ['ch_AbCdEfGhIjKlMnOp', 'ch_QqRrSsTtUuVvWwXx'],
+              cross_group_retry: true,
+            },
+          ],
+        },
+      ],
+    })
+  })
 })
 
 describe('API key routing profile form defaults', () => {
@@ -385,10 +523,46 @@ describe('API key routing profile form defaults', () => {
       {
         id: expect.any(String),
         name: 'normal',
+        mode: 'groups',
         auto_groups: ['vip', 'default'],
+        route_keys: [],
         cross_group_retry: true,
       },
     ])
+  })
+
+  test('restores a stored direct preset in channels mode and keeps invalid keys', () => {
+    const apiKey = apiKeySchema.parse({
+      ...baseApiKey,
+      profiles: {
+        active_profile: 'dsv4f',
+        profiles: [
+          {
+            name: 'dsv4f',
+            active_route_preset: 'direct',
+            route_presets: [
+              {
+                name: 'direct',
+                route_keys: ['ch_AbCdEfGhIjKlMnOp', 'ch_Missing0000000000'],
+                cross_group_retry: false,
+              },
+            ],
+          },
+        ],
+      },
+    })
+
+    const defaults = transformApiKeyToFormDefaults(apiKey)
+    const restored = defaults.profiles[0]?.route_presets[0]
+
+    expect(restored).toMatchObject({
+      name: 'direct',
+      mode: 'channels',
+      route_keys: ['ch_AbCdEfGhIjKlMnOp', 'ch_Missing0000000000'],
+      auto_groups: [],
+      cross_group_retry: false,
+    })
+    expect(defaults.profiles[0]?.active_route_preset).toBe('direct')
   })
 
   test('maps a missing document to empty profiles without losing the key fields', () => {

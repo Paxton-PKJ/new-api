@@ -35,7 +35,7 @@ import { handleServerError } from '@/lib/handle-server-error'
 
 import { switchApiKeyProfile } from '../../api'
 import { ERROR_MESSAGES } from '../../constants'
-import type { ApiKey } from '../../types'
+import type { ApiKey, TokenRoutePreset } from '../../types'
 import { useApiKeys } from '../api-keys-provider'
 
 type ProfileSwitchDialogProps = {
@@ -59,6 +59,13 @@ export function ProfileSwitchDialog(props: ProfileSwitchDialogProps) {
     (profile) => profile.name === activeProfile
   )?.route_presets
   const hasPresets = (presets?.length ?? 0) > 0
+
+  // A preset is direct when it stores route keys; the suffix tells the two
+  // selection styles apart without opening the editor.
+  const presetLabel = (preset: TokenRoutePreset) =>
+    preset.route_keys.length > 0
+      ? `${preset.name} (${t('Channels')} · ${preset.route_keys.length})`
+      : `${preset.name} (${t('Groups')} · ${preset.auto_groups.length})`
 
   useEffect(() => {
     if (!props.open) return
@@ -172,7 +179,7 @@ export function ProfileSwitchDialog(props: ProfileSwitchDialogProps) {
               { value: '', label: t('None') },
               ...(presets ?? []).map((preset) => ({
                 value: preset.name,
-                label: preset.name,
+                label: presetLabel(preset),
               })),
             ]}
             value={activePreset}
@@ -192,7 +199,7 @@ export function ProfileSwitchDialog(props: ProfileSwitchDialogProps) {
                 <SelectItem value=''>{t('None')}</SelectItem>
                 {(presets ?? []).map((preset) => (
                   <SelectItem key={preset.name} value={preset.name}>
-                    {preset.name}
+                    {presetLabel(preset)}
                   </SelectItem>
                 ))}
               </SelectGroup>

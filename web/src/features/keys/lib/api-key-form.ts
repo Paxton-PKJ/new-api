@@ -24,7 +24,13 @@ import { validateModelMappingJson } from '@/features/channels/lib/model-mapping-
 import { parseQuotaFromDollars, quotaUnitsToDollars } from '@/lib/format'
 
 import { DEFAULT_GROUP } from '../constants'
-import type { ApiKey, ApiKeyFormData, TokenProfileConfig } from '../types'
+import type {
+  ApiKey,
+  ApiKeyFormData,
+  TokenProfileConfig,
+  TokenProfileConfigPayload,
+  TokenRoutePresetPayload,
+} from '../types'
 
 // ============================================================================
 // Backend limits
@@ -40,6 +46,25 @@ export const MAX_ROUTING_PROFILES = 16
 export const MAX_ROUTE_PRESETS = 8
 const PROFILE_NAME_MAX_LENGTH = 64
 
+/** Fallback cap for a direct route preset when the server reports none. */
+export const DEFAULT_MAX_ROUTE_PRESET_CHANNELS = 10
+
+/** How a route preset picks its channels: by Auto group order or by route key. */
+export type RoutePresetMode = 'groups' | 'channels'
+
+/** Instance-wide availability of direct route presets for the current user. */
+export type DirectRoutingLimits = {
+  enabled: boolean
+  allowed: boolean
+  maxChannels: number
+}
+
+export const DEFAULT_DIRECT_ROUTING_LIMITS: DirectRoutingLimits = {
+  enabled: false,
+  allowed: false,
+  maxChannels: DEFAULT_MAX_ROUTE_PRESET_CHANNELS,
+}
+
 // ============================================================================
 // Form Schema
 // ============================================================================
@@ -48,7 +73,9 @@ const routePresetFormSchema = z.object({
   /** Client-side identity; profiles and presets can be renamed and reordered. */
   id: z.string(),
   name: z.string(),
+  mode: z.enum(['groups', 'channels']),
   auto_groups: z.array(z.string()),
+  route_keys: z.array(z.string()),
   cross_group_retry: z.boolean(),
 })
 
@@ -169,6 +196,7 @@ function addRoutingProfileIssues(
   activeProfile: string,
   group: string | undefined,
   autoGroupLimit: number,
+  directRouting: DirectRoutingLimits,
   ctx: z.RefinementCtx,
   t: TFunction
 ) {
@@ -263,7 +291,48 @@ function addRoutingProfileIssues(
       }
       presetNames.add(presetName)
 
-      if (preset.auto_groups.length === 0) {
+      if (preset.mode === 'channels') {
+        const routeKeysPath = [...presetPath, 'route_keys']
+        // Instance availability gates the content checks: a preset that cannot
+        // be saved at all should say why before listing what is missing.
+        if (!directRouting.enabled) {
+          ctx.addIssue({
+            code: 'custom',
+            path: routeKeysPath,
+            message: t('Direct channel routing is disabled on this instance'),
+          })
+        } else if (!directRouting.allowed) {
+          ctx.addIssue({
+            code: 'custom',
+            path: routeKeysPath,
+            message: t('Only administrators can configure direct route presets'),
+          })
+        }
+
+        if (preset.route_keys.length === 0) {
+          ctx.addIssue({
+            code: 'custom',
+            path: routeKeysPath,
+            message: t('Select at least one channel for this route preset'),
+          })
+        } else if (preset.route_keys.length > directRouting.maxChannels) {
+          ctx.addIssue({
+            code: 'custom',
+            path: routeKeysPath,
+            message: t('Select at most {{max}} channels', {
+              max: directRouting.maxChannels,
+            }),
+          })
+        }
+
+        if (new Set(preset.route_keys).size !== preset.route_keys.length) {
+          ctx.addIssue({
+            code: 'custom',
+            path: routeKeysPath,
+            message: t('Channels must not contain duplicates'),
+          })
+        }
+      } else if (preset.auto_groups.length === 0) {
         ctx.addIssue({
           code: 'custom',
           path: [...presetPath, 'auto_groups'],
@@ -279,7 +348,10 @@ function addRoutingProfileIssues(
         })
       }
 
-      if (new Set(preset.auto_groups).size !== preset.auto_groups.length) {
+      if (
+        preset.mode === 'groups' &&
+        new Set(preset.auto_groups).size !== preset.auto_groups.length
+      ) {
         ctx.addIssue({
           code: 'custom',
           path: [...presetPath, 'auto_groups'],
@@ -324,7 +396,11 @@ function addRoutingProfileIssues(
   }
 }
 
-export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 5) {
+export function getApiKeyFormSchema(
+  t: TFunction,
+  maxAutoGroups = 5,
+  directRouting: DirectRoutingLimits = DEFAULT_DIRECT_ROUTING_LIMITS
+) {
   const autoGroupLimit =
     Number.isInteger(maxAutoGroups) && maxAutoGroups > 0 ? maxAutoGroups : 5
 
@@ -386,6 +462,7 @@ export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 5) {
         data.active_profile,
         data.group,
         autoGroupLimit,
+        directRouting,
         ctx,
         t
       )
@@ -483,7 +560,7 @@ function formatModelRedirect(mapping?: Record<string, string>): string {
 function transformProfilesToPayload(
   profiles: TokenProfileFormValues[],
   activeProfile: string
-): TokenProfileConfig | null {
+): TokenProfileConfigPayload | null {
   const items = profiles.flatMap((profile) => {
     const name = profile.name.trim()
     if (!name) return []
@@ -492,17 +569,30 @@ function transformProfilesToPayload(
     const modelLimits = profile.model_limits
       .map((limit) => limit.trim())
       .filter(Boolean)
-    const routePresets = profile.route_presets.flatMap((preset) => {
-      const presetName = preset.name.trim()
-      if (!presetName) return []
-      return [
-        {
-          name: presetName,
-          auto_groups: preset.auto_groups,
-          cross_group_retry: preset.cross_group_retry,
-        },
-      ]
-    })
+    const routePresets = profile.route_presets.flatMap(
+      (preset): TokenRoutePresetPayload[] => {
+        const presetName = preset.name.trim()
+        if (!presetName) return []
+        // The backend accepts exactly one selection style per preset, so the
+        // inactive list is dropped instead of being sent empty.
+        if (preset.mode === 'channels') {
+          return [
+            {
+              name: presetName,
+              route_keys: preset.route_keys,
+              cross_group_retry: preset.cross_group_retry,
+            },
+          ]
+        }
+        return [
+          {
+            name: presetName,
+            auto_groups: preset.auto_groups,
+            cross_group_retry: preset.cross_group_retry,
+          },
+        ]
+      }
+    )
     const activeRoutePreset = profile.active_route_preset.trim()
 
     return [
@@ -598,10 +688,14 @@ export function transformApiKeyToFormDefaults(
       model_mapping: formatModelRedirect(profile.model_mapping),
       model_limits: profile.model_limits ?? [],
       active_route_preset: profile.active_route_preset ?? '',
+      // Stored route keys are kept verbatim, including ones whose channel has
+      // been deleted: the editor shows them as invalid so they can be removed.
       route_presets: (profile.route_presets ?? []).map((preset) => ({
         id: nanoid(),
         name: preset.name,
+        mode: (preset.route_keys?.length ?? 0) > 0 ? 'channels' : 'groups',
         auto_groups: preset.auto_groups ?? [],
+        route_keys: preset.route_keys ?? [],
         cross_group_retry: preset.cross_group_retry,
       })),
     })),

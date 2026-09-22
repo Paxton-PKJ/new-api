@@ -199,6 +199,18 @@ describe('Auto group order editor', () => {
     )
   })
 
+  test('renders a plain row with the raw group value and no second line', () => {
+    const { container } = render(<Harness />)
+
+    const title = within(container).getByText('default')
+    expect(title).toHaveAttribute('title', 'default')
+    // The optional label/description props are unused here, so the row keeps
+    // its single title line and its controls keep naming the raw group.
+    expect(title.closest('li')?.querySelectorAll('span')).toHaveLength(1)
+    expect(findButton(container, 'Move default up')).toBeInTheDocument()
+    expect(findButton(container, 'Remove default')).toBeInTheDocument()
+  })
+
   test('adds and removes groups, then restores inheritance as an empty value', () => {
     const { container } = render(<Harness />)
     fireEvent.click(findButton(container, 'Remove vip'))

@@ -68,11 +68,19 @@ const apiKey: ApiKey = {
           {
             name: 'normal',
             auto_groups: ['vip'],
+            route_keys: [],
             cross_group_retry: true,
           },
           {
             name: 'cheap',
             auto_groups: ['default'],
+            route_keys: [],
+            cross_group_retry: false,
+          },
+          {
+            name: 'fast',
+            auto_groups: [],
+            route_keys: ['ch_AbCdEfGhIjKlMnOp', 'ch_QqRrSsTtUuVvWwXx'],
             cross_group_retry: false,
           },
         ],
@@ -83,6 +91,7 @@ const apiKey: ApiKey = {
           {
             name: 'only',
             auto_groups: ['vip'],
+            route_keys: [],
             cross_group_retry: false,
           },
         ],
@@ -202,5 +211,22 @@ describe('API key routing profile quick switch', () => {
     await user.click(await screen.findByRole('option', { name: 'plain' }))
 
     expect(screen.getByLabelText('Active route preset')).toBeDisabled()
+  })
+
+  test('labels every preset with its selection style and size', async () => {
+    const user = userEvent.setup()
+    renderDialog()
+
+    await user.click(screen.getByLabelText('Active route preset'))
+
+    expect(
+      await screen.findByRole('option', { name: 'normal (Groups · 1)' })
+    ).toBeVisible()
+    expect(
+      screen.getByRole('option', { name: 'cheap (Groups · 1)' })
+    ).toBeVisible()
+    expect(
+      screen.getByRole('option', { name: 'fast (Channels · 2)' })
+    ).toBeVisible()
   })
 })

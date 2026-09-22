@@ -20,7 +20,13 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, test } from 'vitest'
 
-import type { TokenProfileFormValues } from '../../lib'
+import type { ChannelRouteOption } from '@/features/channels/types'
+
+import type {
+  DirectRoutingLimits,
+  TokenProfileFormValues,
+  TokenRoutePresetFormValues,
+} from '../../lib'
 
 const { useState } = await import('react')
 const { createInstance } = await import('i18next')
@@ -56,6 +62,25 @@ const GROUP_OPTIONS = [
   { value: 'default', label: 'default', desc: 'Standard access', ratio: 1 },
 ]
 
+const CHANNEL_OPTIONS: ChannelRouteOption[] = [
+  {
+    id: 12,
+    route_key: 'ch_AbCdEfGhIjKlMnOp',
+    name: 'Azure Prod',
+    type: 1,
+    status: 1,
+    tag: 'prod',
+  },
+  {
+    id: 13,
+    route_key: 'ch_QqRrSsTtUuVvWwXx',
+    name: 'Azure Backup',
+    type: 1,
+    status: 2,
+    tag: null,
+  },
+]
+
 function profile(
   name: string,
   overrides: Partial<TokenProfileFormValues> = {}
@@ -71,10 +96,26 @@ function profile(
   }
 }
 
+function routePreset(
+  overrides: Partial<TokenRoutePresetFormValues> = {}
+): TokenRoutePresetFormValues {
+  return {
+    id: 'preset-1',
+    name: 'normal',
+    mode: 'groups',
+    auto_groups: ['vip'],
+    route_keys: [],
+    cross_group_retry: true,
+    ...overrides,
+  }
+}
+
 function Harness(props: {
   initial: TokenProfileFormValues[]
   activeProfile?: string
   groupIsAuto?: boolean
+  directRouting?: DirectRoutingLimits
+  channelOptionsLoaded?: boolean
 }) {
   const [profiles, setProfiles] = useState(props.initial)
   const [activeProfile, setActiveProfile] = useState(props.activeProfile ?? '')
@@ -89,6 +130,15 @@ function Harness(props: {
         groupOptions={GROUP_OPTIONS}
         maxAutoGroups={3}
         groupIsAuto={props.groupIsAuto ?? true}
+        directRouting={
+          props.directRouting ?? {
+            enabled: true,
+            allowed: true,
+            maxChannels: 2,
+          }
+        }
+        channelOptions={CHANNEL_OPTIONS}
+        channelOptionsLoaded={props.channelOptionsLoaded ?? true}
       />
       <output data-testid='profiles'>{JSON.stringify(profiles)}</output>
       <output data-testid='active-profile'>{activeProfile}</output>
@@ -267,6 +317,141 @@ describe('Token routing profiles editor', () => {
     expect(readProfiles(container)[0]?.active_route_preset).toBe('preset-1')
   })
 
+  test('switching a preset to channels clears its Auto group order', () => {
+    const { container } = render(
+      <Harness
+        initial={[
+          profile('dsv4f', { route_presets: [routePreset()] }),
+        ]}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Channels' }))
+
+    const preset = readProfiles(container)[0]?.route_presets?.[0]
+    expect(preset?.mode).toBe('channels')
+    expect(preset?.auto_groups).toEqual([])
+    expect(preset?.route_keys).toEqual([])
+    expect(
+      screen.getByText('Select at least one channel for this route preset.')
+    ).toBeVisible()
+  })
+
+  test('switching a preset back to groups clears the selected channels', () => {
+    const { container } = render(
+      <Harness
+        initial={[
+          profile('dsv4f', {
+            route_presets: [
+              routePreset({
+                mode: 'channels',
+                auto_groups: [],
+                route_keys: ['ch_AbCdEfGhIjKlMnOp'],
+              }),
+            ],
+          }),
+        ]}
+      />
+    )
+
+    expect(screen.getByText('Azure Prod')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Groups' }))
+
+    const preset = readProfiles(container)[0]?.route_presets?.[0]
+    expect(preset?.mode).toBe('groups')
+    expect(preset?.route_keys).toEqual([])
+    expect(preset?.auto_groups).toEqual([])
+    expect(
+      screen.getByText('Select at least one Auto group for this route preset.')
+    ).toBeVisible()
+  })
+
+  test('disables the channel mode with the reason the instance reports', () => {
+    const { container, rerender } = render(
+      <Harness
+        initial={[profile('dsv4f', { route_presets: [routePreset()] })]}
+        directRouting={{ enabled: false, allowed: true, maxChannels: 2 }}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Channels' })).toBeDisabled()
+    expect(
+      screen.getByText('Direct channel routing is disabled on this instance')
+    ).toBeVisible()
+
+    rerender(
+      <Harness
+        initial={[profile('dsv4f', { route_presets: [routePreset()] })]}
+        directRouting={{ enabled: true, allowed: false, maxChannels: 2 }}
+      />
+    )
+    expect(screen.getByRole('button', { name: 'Channels' })).toBeDisabled()
+    expect(
+      screen.getByText('Only administrators can configure direct route presets')
+    ).toBeVisible()
+    expect(readProfiles(container)[0]?.route_presets?.[0]?.mode).toBe('groups')
+  })
+
+  test('keeps a stored direct preset editable when the mode is unavailable', () => {
+    render(
+      <Harness
+        initial={[
+          profile('dsv4f', {
+            route_presets: [
+              routePreset({
+                mode: 'channels',
+                auto_groups: [],
+                route_keys: ['ch_AbCdEfGhIjKlMnOp'],
+              }),
+            ],
+          }),
+        ]}
+        directRouting={{ enabled: false, allowed: true, maxChannels: 2 }}
+      />
+    )
+
+    expect(screen.getByText('Azure Prod')).toBeVisible()
+    expect(screen.getByText('1 / 2 channels selected')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Channels' })).toBeDisabled()
+  })
+
+  test('adds and removes channels of a direct route preset', () => {
+    const { container } = render(
+      <Harness
+        initial={[
+          profile('dsv4f', {
+            route_presets: [
+              routePreset({
+                mode: 'channels',
+                auto_groups: [],
+                route_keys: ['ch_AbCdEfGhIjKlMnOp'],
+              }),
+            ],
+          }),
+        ]}
+      />
+    )
+
+    fireEvent.click(
+      within(getPresetBox(container)).getByRole('combobox')
+    )
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="command-item"]'),
+    ].find((candidate) => candidate.textContent?.includes('Azure Backup'))
+    if (!option) throw new Error('Expected the second channel candidate')
+    fireEvent.click(option)
+
+    expect(readProfiles(container)[0]?.route_presets?.[0]?.route_keys).toEqual([
+      'ch_AbCdEfGhIjKlMnOp',
+      'ch_QqRrSsTtUuVvWwXx',
+    ])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Azure Prod' }))
+    expect(readProfiles(container)[0]?.route_presets?.[0]?.route_keys).toEqual([
+      'ch_QqRrSsTtUuVvWwXx',
+    ])
+  })
+
   test('clears the active preset when its route preset is removed', () => {
     const { container } = render(
       <Harness
@@ -277,7 +462,9 @@ describe('Token routing profiles editor', () => {
               {
                 id: 'preset-a',
                 name: 'preset-1',
+                mode: 'groups',
                 auto_groups: ['vip'],
+                route_keys: [],
                 cross_group_retry: true,
               },
             ],

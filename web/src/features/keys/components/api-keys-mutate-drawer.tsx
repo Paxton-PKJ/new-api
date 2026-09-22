@@ -68,6 +68,7 @@ import {
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { getChannelRouteOptions } from '@/features/channels/api'
 import { ModelMappingEditor } from '@/features/channels/components/model-mapping-editor'
 import { RelatedPolicyLink } from '@/features/system-settings/request-policies/related-policy-link'
 import { useStatus } from '@/hooks/use-status'
@@ -85,8 +86,10 @@ import {
 } from '../api'
 import { ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
 import {
+  DEFAULT_MAX_ROUTE_PRESET_CHANNELS,
   getApiKeyFormSchema,
   type ApiKeyFormValues,
+  type DirectRoutingLimits,
   getApiKeyFormDefaultValues,
   transformFormDataToPayload,
   transformApiKeyToFormDefaults,
@@ -167,6 +170,33 @@ export function ApiKeysMutateDrawer({
     staleTime: 0,
   })
 
+  const directRouting = useMemo<DirectRoutingLimits>(() => {
+    const config = autoGroupsData?.data?.direct_routing
+    const maxChannels = Number(config?.max_channels)
+    return {
+      enabled: config?.enabled === true,
+      allowed: config?.allowed === true,
+      maxChannels:
+        Number.isInteger(maxChannels) && maxChannels > 0
+          ? maxChannels
+          : DEFAULT_MAX_ROUTE_PRESET_CHANNELS,
+    }
+  }, [autoGroupsData])
+
+  // Non-administrators cannot read the channel list, so the query stays idle
+  // and the editor never claims a stored route key is invalid.
+  const {
+    data: channelOptionsData,
+    isFetched: channelOptionsFetched,
+  } = useQuery({
+    queryKey: ['channel-route-options'],
+    queryFn: async () => requireServerSuccess(await getChannelRouteOptions()),
+    enabled: open && directRouting.allowed,
+    staleTime: 0,
+  })
+  const channelOptions = channelOptionsData?.data ?? []
+  const channelOptionsLoaded = !directRouting.allowed || channelOptionsFetched
+
   const models = modelsData?.data || []
   const groups = useMemo<ApiKeyGroupOption[]>(
     () =>
@@ -206,8 +236,8 @@ export function ApiKeysMutateDrawer({
       ? Number(autoGroupsData?.data?.max_count)
       : 5
   const schema = useMemo(
-    () => getApiKeyFormSchema(t, maxAutoGroups),
-    [t, maxAutoGroups]
+    () => getApiKeyFormSchema(t, maxAutoGroups, directRouting),
+    [t, maxAutoGroups, directRouting]
   )
 
   const form = useForm<ApiKeyFormValues>({
@@ -732,6 +762,9 @@ export function ApiKeysMutateDrawer({
                       groupOptions={routingGroupOptions}
                       maxAutoGroups={maxAutoGroups}
                       groupIsAuto={selectedGroup === 'auto'}
+                      directRouting={directRouting}
+                      channelOptions={channelOptions}
+                      channelOptionsLoaded={channelOptionsLoaded}
                       disabled={isSubmitting}
                       errors={formErrors.profiles}
                       activeProfileError={formErrors.active_profile}
