@@ -629,6 +629,66 @@ it('saves an edited same-channel budget without writing unchanged attempt caps',
   })
 })
 
+it('saves the direct channel routing switch and cap without rewriting unrelated options', async () => {
+  currentOptions = {
+    ...options,
+    EnableDirectChannelRouting: 'false',
+    MaxRoutePresetChannels: '20',
+  }
+  show()
+  const toggle = await screen.findByRole('switch', {
+    name: 'Enable direct channel routing',
+  })
+  expect(toggle).not.toBeChecked()
+  const cap = screen.getByRole('spinbutton', {
+    name: 'Maximum channels per route preset',
+  })
+  expect(cap).toHaveValue(20)
+  await userEvent.click(toggle)
+  fireEvent.change(cap, { target: { value: '32' } })
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  expect(vi.mocked(api.patch).mock.calls[0][1]).toEqual({
+    options: {
+      EnableDirectChannelRouting: 'true',
+      MaxRoutePresetChannels: '32',
+    },
+  })
+})
+
+it('a server without the direct routing options keeps the safe defaults and saves nothing', async () => {
+  show()
+  const toggle = await screen.findByRole('switch', {
+    name: 'Enable direct channel routing',
+  })
+  expect(toggle).not.toBeChecked()
+  const cap = screen.getByRole('spinbutton', {
+    name: 'Maximum channels per route preset',
+  })
+  expect(cap).toHaveValue(10)
+  expect(cap).not.toHaveAttribute('aria-invalid', 'true')
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(api.patch).not.toHaveBeenCalled()
+})
+
+it('a rejected disable keeps the switch on and shows the tokens still using direct presets', async () => {
+  currentOptions = { ...options, EnableDirectChannelRouting: 'true' }
+  const message =
+    'direct channel routing is still used by 2 token(s); switch their active route presets first'
+  vi.mocked(api.patch).mockResolvedValue({
+    data: { success: false, message },
+  })
+  show()
+  const toggle = await screen.findByRole('switch', {
+    name: 'Enable direct channel routing',
+  })
+  expect(toggle).toBeChecked()
+  await userEvent.click(toggle)
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(await screen.findByText(message)).toBeVisible()
+  expect(toggle).not.toBeChecked()
+})
+
 it('rejects a same-channel budget outside the supported range without saving', async () => {
   currentOptions = {
     ...options,

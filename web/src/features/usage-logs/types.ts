@@ -146,6 +146,9 @@ export interface LogOtherData {
     }
     // Reject / intercept reason (admin only)
     reject_reason?: string
+    // Stable route key of the channel that served the request, recorded when a
+    // direct route preset selected it. Admin-only (nested under admin_info).
+    route_key?: string
     task_plugin?: TaskPluginInfo
   }
   root_info?: {

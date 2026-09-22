@@ -33,6 +33,7 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { ChannelAffinitySection } from '../general/channel-affinity'
 import { safeNumberFieldProps } from '../utils/numeric-field'
 import { getPolicyConfig, type PolicyConfig } from './api'
+import { DirectRoutingSection } from './direct-routing-section'
 import { policyLabel } from './policy-label'
 import { RetrySection } from './retry-section'
 import {
@@ -151,6 +152,7 @@ function RoutingPolicyEditor(props: { config: PolicyConfig }) {
             )}
           />
           <RetrySection />
+          <DirectRoutingSection />
           {mutation.isError ? (
             <p role='alert' className='text-destructive text-sm'>
               {mutation.error.message}

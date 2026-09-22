@@ -71,9 +71,28 @@ export const channelSchema = z.object({
     multi_key_mode: 'random',
   }),
   settings: z.string().default('{}'), // other_settings JSON
+  // Stable routing identity. Read-only: the server assigns it on create and
+  // ignores it in update payloads.
+  route_key: z.string().nullish().default(''),
 })
 
 export type Channel = z.infer<typeof channelSchema>
+
+export interface ApiResponse<T = unknown> {
+  success: boolean
+  message?: string
+  data?: T
+}
+
+/** One channel as offered to direct route presets: identity without secrets. */
+export interface ChannelRouteOption {
+  id: number
+  route_key: string | null
+  name: string
+  type: number
+  status: number
+  tag: string | null
+}
 
 // ============================================================================
 // Channel Settings Types

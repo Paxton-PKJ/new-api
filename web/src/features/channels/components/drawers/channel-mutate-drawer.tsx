@@ -45,6 +45,7 @@ import {
   type ComponentProps,
   type ReactNode,
   useEffect,
+  useId,
   useState,
   useMemo,
   useCallback,
@@ -54,6 +55,7 @@ import { type SubmitErrorHandler, useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { CopyButton } from '@/components/copy-button'
 import {
   sideDrawerContentClassName,
   sideDrawerFooterClassName,
@@ -82,6 +84,7 @@ import {
 } from '@/components/ui/form'
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { PopoverDescription, PopoverTitle } from '@/components/ui/popover'
 import {
   Select,
@@ -459,6 +462,7 @@ export function ChannelMutateDrawer({
     useState<ChannelConnectionInfo | null>(null)
 
   const isEditing = Boolean(currentRow)
+  const routeKeyId = useId()
   const requestedSide = isEditing ? 'left' : 'right'
   const [drawerSide, setDrawerSide] = useState<'left' | 'right'>(requestedSide)
   // The parent clears currentRow as soon as closing starts. Keep the last
@@ -2624,6 +2628,25 @@ export function ChannelMutateDrawer({
               </FormItem>
             )}
           />
+          {isEditing && currentRow?.route_key ? (
+            <div className='grid gap-2'>
+              <Label htmlFor={routeKeyId}>{t('Route Key')}</Label>
+              <div className='flex items-center gap-2'>
+                <Input
+                  id={routeKeyId}
+                  readOnly
+                  value={currentRow.route_key}
+                  className='font-mono'
+                />
+                <CopyButton value={currentRow.route_key} />
+              </div>
+              <FormDescription>
+                {t(
+                  'Stable identity used by direct route presets. It never changes when the channel is renamed and is regenerated when the channel is copied.'
+                )}
+              </FormDescription>
+            </div>
+          ) : null}
         </div>
 
         {!isEditing && (

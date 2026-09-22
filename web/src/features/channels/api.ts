@@ -23,11 +23,13 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 import type { InferenceStatus } from './lib/inference-status'
 import type {
   AddChannelRequest,
+  ApiResponse,
   BatchDeleteParams,
   BatchSetTagParams,
   Channel,
   ChannelBalanceResponse,
   ChannelOpsResponse,
+  ChannelRouteOption,
   ChannelTestResponse,
   CopyChannelParams,
   CopyChannelResponse,
@@ -162,6 +164,17 @@ export async function getChannelDefaultBaseURLs(): Promise<
     data: Partial<Record<number, string>>
   }>('/api/channel/default_base_urls')
   return requireServerSuccess(response.data).data
+}
+
+/**
+ * Read-only channel identities that direct route presets can reference.
+ * Administrator-only on the server.
+ */
+export async function getChannelRouteOptions(): Promise<
+  ApiResponse<ChannelRouteOption[]>
+> {
+  const res = await api.get('/api/channel/route_options')
+  return res.data
 }
 
 /**

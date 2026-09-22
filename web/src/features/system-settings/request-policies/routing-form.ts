@@ -8,6 +8,8 @@ export function createRoutingPolicySchema(t: TFunction) {
     RetryTimes: z.number().int().min(0).max(99),
     DefaultSameChannelRetryTimes: z.number().int().min(0).max(10),
     MaxTotalAttempts: z.number().int().min(0).max(999),
+    EnableDirectChannelRouting: z.boolean(),
+    MaxRoutePresetChannels: z.number().int().min(1).max(64),
     AutomaticRetryStatusCodes: z
       .string()
       .refine(
@@ -56,6 +58,9 @@ export function routingPolicyFormValues(
       options.DefaultSameChannelRetryTimes ?? 0
     ),
     MaxTotalAttempts: Number(options.MaxTotalAttempts ?? 0),
+    EnableDirectChannelRouting:
+      options.EnableDirectChannelRouting === 'true',
+    MaxRoutePresetChannels: Number(options.MaxRoutePresetChannels ?? 10),
     AutomaticRetryStatusCodes: options.AutomaticRetryStatusCodes,
     channel_affinity_setting: {
       enabled: options['channel_affinity_setting.enabled'] === 'true',
@@ -81,6 +86,8 @@ export function routingPolicyOptions(
     RetryTimes: String(values.RetryTimes),
     DefaultSameChannelRetryTimes: String(values.DefaultSameChannelRetryTimes),
     MaxTotalAttempts: String(values.MaxTotalAttempts),
+    EnableDirectChannelRouting: String(values.EnableDirectChannelRouting),
+    MaxRoutePresetChannels: String(values.MaxRoutePresetChannels),
     AutomaticRetryStatusCodes: values.AutomaticRetryStatusCodes,
     ...Object.fromEntries(
       Object.entries(values.channel_affinity_setting).map(([key, value]) => [

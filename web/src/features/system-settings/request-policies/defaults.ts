@@ -39,6 +39,10 @@ export type HealthSettings = {
     | 'auto_ban_only'
     | 'passive_recovery'
 }
+export type DirectRoutingSettings = {
+  EnableDirectChannelRouting: boolean
+  MaxRoutePresetChannels: number
+}
 export type FilteringSettings = Pick<
   SecuritySettings,
   'CheckSensitiveEnabled' | 'CheckSensitiveOnPromptEnabled' | 'SensitiveWords'
@@ -46,12 +50,15 @@ export type FilteringSettings = Pick<
 export type RequestPolicySettings = RetrySettings &
   HealthSettings &
   FilteringSettings &
+  DirectRoutingSettings &
   Pick<ChannelAffinitySettings, keyof ChannelAffinitySettings>
 
 export const defaultRequestPolicySettings: RequestPolicySettings = {
   RetryTimes: 0,
   DefaultSameChannelRetryTimes: 0,
   MaxTotalAttempts: 0,
+  EnableDirectChannelRouting: false,
+  MaxRoutePresetChannels: 10,
   AutomaticRetryStatusCodes:
     '100-199,300-399,401-407,409-499,500-503,505-523,525-599',
   ChannelDisableThreshold: '',

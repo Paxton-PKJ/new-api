@@ -1154,6 +1154,13 @@ export function DetailsDialog(props: DetailsDialogProps) {
             mono
           />
         )}
+        {props.isAdmin && other?.admin_info?.route_key && (
+          <DetailRow
+            label={t('Route Key')}
+            value={other.admin_info.route_key}
+            mono
+          />
+        )}
         {/* Model mapping for logs without response observations */}
         {!other?.response_model &&
           other?.is_model_mapped &&

@@ -1317,6 +1317,63 @@ test('editing opens the shared configuration and omits an unchanged key on updat
   expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key')
 })
 
+test('editing shows the read-only Route Key and never sends it back on update', async () => {
+  const channel = channelSchema.parse({
+    id: 42,
+    name: 'Existing channel',
+    type: 1,
+    key: '',
+    status: 1,
+    created_time: 1,
+    test_time: 0,
+    response_time: 0,
+    balance_updated_time: 0,
+    models: 'custom-model',
+    group: 'default',
+    route_key: 'ch_AbCdEfGhIjKlMnOp',
+  })
+  const originalGet = vi.mocked(api.get).getMockImplementation()
+  vi.mocked(api.get).mockImplementation(async (url, config) => {
+    if (url === '/api/channel/42') {
+      return { data: { success: true, data: channel } }
+    }
+    return originalGet?.(url, config)
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={channel} />)
+  await screen.findByDisplayValue('Existing channel')
+
+  const routeKey = screen.getByLabelText('Route Key')
+  expect(routeKey).toHaveValue('ch_AbCdEfGhIjKlMnOp')
+  expect(routeKey).toHaveAttribute('readonly')
+  expect(
+    screen.getByRole('button', { name: 'Copy to clipboard' })
+  ).toBeVisible()
+
+  fireEvent.change(screen.getByLabelText('Name *'), {
+    target: { value: 'Renamed channel' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(put.mock.calls[0]?.[1]).toMatchObject({
+    id: 42,
+    name: 'Renamed channel',
+  })
+  expect(put.mock.calls[0]?.[1]).not.toHaveProperty('route_key')
+})
+
+test('creation offers no Route Key field', async () => {
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(await screen.findByRole('option', { name: /^DeepSeek / }))
+
+  expect(screen.getByLabelText('Name *')).toHaveValue('DeepSeek')
+  expect(screen.queryByLabelText('Route Key')).not.toBeInTheDocument()
+})
+
 test('editing legacy channels retains the full provider list and saves the original type', async () => {
   editingChannel = { ...editingChannel, type: 55 }
   pluginOptions = [

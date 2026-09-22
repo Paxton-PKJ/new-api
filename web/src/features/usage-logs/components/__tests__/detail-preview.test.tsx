@@ -258,6 +258,31 @@ test.each([
 )
 
 test.each([
+  { isAdmin: true, recorded: true, shown: true },
+  { isAdmin: true, recorded: false, shown: false },
+  { isAdmin: false, recorded: true, shown: false },
+])(
+  'the opened dialog shows the Route Key only to administrators when it was recorded: admin=$isAdmin recorded=$recorded',
+  async ({ isAdmin, recorded, shown }) => {
+    const other: LogOtherData = {
+      model_price: 0.25,
+      route_preset: 'normal',
+      ...(recorded ? { admin_info: { route_key: 'ch_XyZ0123456789ab' } } : {}),
+    }
+    const preview = renderPreview(other, isAdmin)
+    fireEvent.click(preview)
+    const dialog = within(await screen.findByRole('dialog'))
+    if (shown) {
+      expect(dialog.getByText('Route Key')).toBeVisible()
+      expect(dialog.getByText('ch_XyZ0123456789ab')).toBeVisible()
+    } else {
+      expect(dialog.queryByText('Route Key')).not.toBeInTheDocument()
+      expect(dialog.queryByText('ch_XyZ0123456789ab')).not.toBeInTheDocument()
+    }
+  }
+)
+
+test.each([
   {
     expression: 'tier("music", u("clips") * 0.25)',
     tier: 'music',
