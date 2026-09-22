@@ -4,6 +4,9 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -141,6 +144,174 @@ func TestChannelUpdateDoesNotClobberRouteKey(t *testing.T) {
 	require.NoError(t, DB.First(&stored, channel.Id).Error)
 	assert.Equal(t, "route-key-updated", stored.Name)
 	assert.Equal(t, original, stored.GetRouteKey())
+}
+
+func TestRouteGroupNaming(t *testing.T) {
+	const key = "ch_0123456789AbCdEf"
+	assert.Equal(t, "__route_"+key, RouteGroupName(key))
+	assert.True(t, IsRouteGroup(RouteGroupName(key)))
+	assert.False(t, IsRouteGroup("default"))
+	assert.False(t, IsRouteGroup(""))
+
+	for _, tc := range []struct {
+		group  string
+		key    string
+		valid  bool
+		reason string
+	}{
+		{group: RouteGroupName(key), key: key, valid: true},
+		{group: "default", reason: "an official group is not a route group"},
+		{group: DirectRouteGroupPrefix, reason: "the bare prefix carries no identity"},
+		{group: RouteGroupName("ch_tooShort"), reason: "a malformed identity never resolves"},
+		{group: "__route_default", reason: "a group name that only looks prefixed is rejected"},
+		{group: "__x" + key, reason: "a different prefix is not a route group"},
+	} {
+		got, ok := RouteKeyFromGroup(tc.group)
+		assert.Equal(t, tc.valid, ok, "group %q: %s", tc.group, tc.reason)
+		assert.Equal(t, tc.key, got, "group %q", tc.group)
+	}
+
+	// The virtual group name is derived, never stored: no ability row may carry it.
+	assert.True(t, IsValidChannelRouteKey(key))
+	assert.NotContains(t, RouteGroupName(key), " ")
+}
+
+// newRouteGroupTestChannels inserts one enabled and one disabled channel with
+// their own route identities and points the test at a cache mode. It returns the
+// enabled channel, the disabled one, and the enabled channel's route group name.
+func newRouteGroupTestChannels(t *testing.T, memoryCache bool) (*Channel, *Channel, string) {
+	t.Helper()
+	previousCache := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = memoryCache
+	for _, table := range []string{"abilities", "channels"} {
+		require.NoError(t, DB.Exec("DELETE FROM "+table).Error)
+	}
+	t.Cleanup(func() {
+		for _, table := range []string{"abilities", "channels"} {
+			require.NoError(t, DB.Exec("DELETE FROM "+table).Error)
+		}
+		common.MemoryCacheEnabled = previousCache
+		InitChannelCache()
+	})
+
+	enabled := &Channel{
+		Name: "route-group-enabled", Key: "sk-enabled", Status: common.ChannelStatusEnabled,
+		Group: "default", Models: "claude-3-7-sonnet,gpt-4o",
+	}
+	require.NoError(t, DB.Create(enabled).Error)
+	disabled := &Channel{
+		Name: "route-group-disabled", Key: "sk-disabled", Status: common.ChannelStatusManuallyDisabled,
+		Group: "default", Models: "claude-3-7-sonnet",
+	}
+	require.NoError(t, DB.Create(disabled).Error)
+	require.NoError(t, DB.Create(&Ability{Group: "default", Model: "claude-3-7-sonnet", ChannelId: enabled.Id, Enabled: true}).Error)
+	InitChannelCache()
+	require.True(t, IsValidChannelRouteKey(enabled.GetRouteKey()))
+	return enabled, disabled, RouteGroupName(enabled.GetRouteKey())
+}
+
+// TestResolveRouteGroupChannel covers both lookup paths of the virtual group
+// resolver: every rejection reason returns nil so the auto-group loop can move
+// on to the next entry.
+func TestResolveRouteGroupChannel(t *testing.T) {
+	for _, memoryCache := range []bool{true, false} {
+		t.Run(map[bool]string{true: "memory cache", false: "database"}[memoryCache], func(t *testing.T) {
+			enabled, disabled, group := newRouteGroupTestChannels(t, memoryCache)
+
+			resolved := resolveRouteGroupChannel(group, "claude-3-7-sonnet", nil)
+			require.NotNil(t, resolved, "an enabled channel that serves the model resolves")
+			assert.Equal(t, enabled.Id, resolved.Id)
+
+			// RoutingMatchModelName strips the thinking suffix, matching the
+			// second lookup of GetRandomSatisfiedChannel.
+			resolved = resolveRouteGroupChannel(group, "claude-3-7-sonnet-thinking", nil)
+			require.NotNil(t, resolved, "the normalized model name is tried as well")
+			assert.Equal(t, enabled.Id, resolved.Id)
+
+			assert.Nil(t, resolveRouteGroupChannel(group, "gpt-5.1", nil), "a model the channel does not serve resolves to nothing")
+			assert.Nil(t, resolveRouteGroupChannel(RouteGroupName(disabled.GetRouteKey()), "claude-3-7-sonnet", nil),
+				"a disabled channel resolves to nothing")
+			assert.Nil(t, resolveRouteGroupChannel(RouteGroupName("ch_0123456789AbCdEf"), "claude-3-7-sonnet", nil),
+				"an unknown identity resolves to nothing")
+			assert.Nil(t, resolveRouteGroupChannel("default", "claude-3-7-sonnet", nil),
+				"an official group is not resolved here")
+			assert.NotNil(t, resolveRouteGroupChannel(group, "claude-3-7-sonnet", []dto.ChannelFilter{
+				{Kind: dto.FilterRequestPath, RequestPath: "/v1/messages"},
+			}), "a request path filter only constrains advanced custom channels")
+
+			// GetRandomSatisfiedChannel is the only channel entry the relay uses.
+			channel, err := GetRandomSatisfiedChannel(group, "claude-3-7-sonnet", 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, channel)
+			assert.Equal(t, enabled.Id, channel.Id)
+			channel, err = GetRandomSatisfiedChannel(group, "gpt-5.1", 2, nil)
+			require.NoError(t, err)
+			assert.Nil(t, channel, "an unavailable route group returns no channel and no error")
+		})
+	}
+}
+
+// TestResolveRouteGroupChannelHonorsAdvancedCustomRoute proves the request-path
+// filter is not silently dropped for the advanced custom channel type.
+func TestResolveRouteGroupChannelHonorsAdvancedCustomRoute(t *testing.T) {
+	resetChannelRouteKeys(t)
+	channel := &Channel{
+		Name: "route-group-advanced", Key: "sk-advanced", Type: constant.ChannelTypeAdvancedCustom,
+		Status: common.ChannelStatusEnabled, Group: "default", Models: "gpt-4o",
+	}
+	channel.SetOtherSettings(kitdto.ChannelOtherSettings{AdvancedCustom: &kitdto.AdvancedCustomConfig{
+		Routes: []kitdto.AdvancedCustomRoute{{IncomingPath: "/v1/messages", UpstreamPath: "/v1/messages"}},
+	}})
+	require.NoError(t, DB.Create(channel).Error)
+	group := RouteGroupName(channel.GetRouteKey())
+
+	require.NotNil(t, resolveRouteGroupChannel(group, "gpt-4o", []dto.ChannelFilter{
+		{Kind: dto.FilterRequestPath, RequestPath: "/v1/messages"},
+	}), "the configured route is not filtered out")
+	assert.Nil(t, resolveRouteGroupChannel(group, "gpt-4o", []dto.ChannelFilter{
+		{Kind: dto.FilterRequestPath, RequestPath: "/v1/responses"},
+	}), "a path the channel does not serve is filtered out")
+}
+
+// TestRouteKeyIndexTracksCacheUpdates pins the cache index behind the virtual
+// groups: a rebuilt cache resolves every stored identity, and a channel whose
+// identity changes stops resolving under the old one.
+func TestRouteKeyIndexTracksCacheUpdates(t *testing.T) {
+	enabled, disabled, group := newRouteGroupTestChannels(t, true)
+
+	assert.Nil(t, resolveRouteGroupChannel(RouteGroupName(disabled.GetRouteKey()), "claude-3-7-sonnet", nil),
+		"a disabled channel stays indexed but never resolves")
+
+	replacement := "ch_replacementKey01"
+	updated := *enabled
+	updated.RouteKey = &replacement
+	CacheUpdateChannel(&updated)
+
+	assert.NotNil(t, resolveRouteGroupChannel(RouteGroupName(replacement), "claude-3-7-sonnet", nil),
+		"the new identity resolves after the cache update")
+	assert.Nil(t, resolveRouteGroupChannel(group, "claude-3-7-sonnet", nil),
+		"the previous identity no longer resolves")
+}
+
+func TestGetGroupEnabledModelsForRouteGroup(t *testing.T) {
+	_, disabled, group := newRouteGroupTestChannels(t, true)
+
+	assert.Equal(t, []string{"claude-3-7-sonnet", "gpt-4o"}, GetGroupEnabledModels(group))
+	assert.Empty(t, GetGroupEnabledModels(RouteGroupName(disabled.GetRouteKey())),
+		"a disabled channel exposes no model")
+	assert.Empty(t, GetGroupEnabledModels(RouteGroupName("ch_0123456789AbCdEf")))
+}
+
+func TestIsChannelEnabledForGroupModelForRouteGroup(t *testing.T) {
+	enabled, disabled, group := newRouteGroupTestChannels(t, true)
+
+	assert.True(t, IsChannelEnabledForGroupModel(group, "claude-3-7-sonnet", enabled.Id))
+	assert.True(t, IsChannelEnabledForGroupModel(group, "claude-3-7-sonnet-thinking", enabled.Id),
+		"the normalized model name is accepted")
+	assert.False(t, IsChannelEnabledForGroupModel(group, "claude-3-7-sonnet", disabled.Id))
+	assert.False(t, IsChannelEnabledForGroupModel(group, "gpt-5.1", enabled.Id))
+	assert.False(t, IsChannelEnabledForGroupModel(RouteGroupName(disabled.GetRouteKey()), "claude-3-7-sonnet", disabled.Id),
+		"a disabled channel is not enabled for its own route group")
 }
 
 func TestListChannelRouteOptionsOmitsSecrets(t *testing.T) {

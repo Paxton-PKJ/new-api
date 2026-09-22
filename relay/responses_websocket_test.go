@@ -277,6 +277,73 @@ func TestRestoreConnectionContextRejectsChangedAdvancedCustomRoute(t *testing.T)
 	assert.ErrorContains(t, apiErr, "upstream route changed")
 }
 
+// A direct route preset locks the connection to a route identity, not to a
+// visible group: the next create revalidates the locked virtual group against
+// the token's Auto groups, reports the attempt under the user group, and stops
+// as soon as the identity leaves the preset.
+func TestRestoreConnectionContextAcceptsDirectRouteGroup(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousCache := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	previousFlag := common.EnableDirectChannelRouting
+	common.EnableDirectChannelRouting = true
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = previousCache
+		common.EnableDirectChannelRouting = previousFlag
+	})
+	database := setupRelayChannelDB(t)
+	require.NoError(t, database.AutoMigrate(&model.Ability{}))
+	baseURL := "http://upstream.example"
+	channel := &model.Channel{Name: "direct", Key: "sk-test", Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Group: "rt-direct", Models: "ws-model", BaseURL: &baseURL}
+	channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+	require.NoError(t, database.Create(channel).Error)
+	t.Cleanup(func() {
+		require.NoError(t, database.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, database.Where("id = ?", channel.Id).Delete(&model.Channel{}).Error)
+	})
+
+	routeGroup := model.RouteGroupName(channel.GetRouteKey())
+	newSession := func() *responsesWSSession {
+		return &responsesWSSession{lockedChannelID: channel.Id, lockedModel: "ws-model", lockedKey: "sk-test", lockedGroup: routeGroup,
+			lockedContext: map[constant.ContextKey]any{
+				constant.ContextKeyChannelBaseUrl:        channel.GetBaseURL(),
+				constant.ContextKeyChannelHeaderOverride: channel.GetHeaderOverride(),
+			}}
+	}
+	newContext := func() *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "auto")
+		common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+		common.SetContextKey(c, constant.ContextKeyTokenRouteChannels, []string{channel.GetRouteKey()})
+		return c
+	}
+
+	c := newContext()
+	require.Nil(t, newSession().restoreConnectionContext(c, "ws-model"))
+	assert.Equal(t, "default", common.GetContextKeyString(c, constant.ContextKeyAutoGroup),
+		"the attempt is reported under the user group, never the virtual one")
+	assert.Equal(t, routeGroup, c.GetString(string(constant.ContextKeySelectedRouteGroup)))
+	assert.Equal(t, channel.GetRouteKey(), common.GetContextKeyString(c, constant.ContextKeyRouteKey))
+
+	// The preset no longer lists the identity: the connection may not reuse it.
+	gone := newContext()
+	common.SetContextKey(gone, constant.ContextKeyTokenRouteChannels, []string{"ch_0123456789AbCdEf"})
+	apiErr := newSession().restoreConnectionContext(gone, "ws-model")
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	assert.ErrorContains(t, apiErr, "no longer allowed")
+
+	// The channel stops serving the locked model: the identity is still in the
+	// preset, but it no longer resolves for that model.
+	require.NoError(t, database.Model(channel).Update("models", "other-model").Error)
+	dropped := newContext()
+	apiErr = newSession().restoreConnectionContext(dropped, "ws-model")
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	assert.ErrorContains(t, apiErr, "no longer allowed for this group and model")
+}
+
 func TestResponsesWSChannelRoutingRequiresExplicitOptIn(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	database := setupRelayChannelDB(t)

@@ -70,3 +70,45 @@ func TestGetRequestAutoGroupsDoesNotFallBackAfterPermissionChange(t *testing.T) 
 
 	assert.Empty(t, groups)
 }
+
+// A direct route preset turns its route keys into virtual groups in order. The
+// list is the trusted output of SetupContextForToken, so the token auto-group
+// limit and the user-facing group visibility never trim it.
+func TestGetRequestAutoGroupsPrefersDirectRoutePreset(t *testing.T) {
+	configureRequestAutoGroupsTest(t)
+	previousFlag := common.EnableDirectChannelRouting
+	t.Cleanup(func() { common.EnableDirectChannelRouting = previousFlag })
+	common.EnableDirectChannelRouting = true
+
+	// The virtual groups are not user-selectable groups, but they are deliberately
+	// present in both registries: the direct preset must not depend on them.
+	const routeGroup = "__route_ch_0123456789AbCdEf"
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(
+		`{"default":"Default","vip":"VIP","`+routeGroup+`":"Route"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(
+		`{"default":1,"vip":1,"`+routeGroup+`":1}`))
+
+	ctx := newRequestAutoGroupsContext()
+	common.SetContextKey(ctx, constant.ContextKeyTokenRouteChannels,
+		[]string{"ch_0123456789AbCdEf", "ch_fedCbA9876543210", "ch_ABCDEF0123456789"})
+
+	assert.Equal(t, []string{routeGroup, "__route_ch_fedCbA9876543210", "__route_ch_ABCDEF0123456789"},
+		GetRequestAutoGroups(ctx, "default"), "the preset order survives the per-token auto group limit")
+	assert.False(t, IsUserSelectableGroup("default", routeGroup), "a virtual group is never user selectable")
+	assert.False(t, IsUserSelectableGroup("default", "auto"))
+	assert.True(t, IsUserSelectableGroup("default", "vip"))
+}
+
+func TestGetRequestAutoGroupsIgnoresDirectRoutePresetWhenDisabled(t *testing.T) {
+	configureRequestAutoGroupsTest(t)
+	previousFlag := common.EnableDirectChannelRouting
+	t.Cleanup(func() { common.EnableDirectChannelRouting = previousFlag })
+	common.EnableDirectChannelRouting = false
+
+	ctx := newRequestAutoGroupsContext()
+	common.SetContextKey(ctx, constant.ContextKeyTokenRouteChannels, []string{"ch_0123456789AbCdEf"})
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip"})
+
+	assert.Equal(t, []string{"vip"}, GetRequestAutoGroups(ctx, "default"),
+		"a disabled feature falls back to the token's own auto groups")
+}

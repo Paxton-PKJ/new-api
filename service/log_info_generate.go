@@ -72,6 +72,11 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 		return
 	}
 	other.SetAdmin("use_channel", ctx.GetStringSlice("use_channel"))
+	// 直连路由命中的渠道路由身份标识具体渠道，只对管理员可见；预设名本身已由
+	// 令牌所有者的配置公开记录为 route_preset。
+	if routeKey := common.GetContextKeyString(ctx, constant.ContextKeyRouteKey); routeKey != "" {
+		other.SetAdmin("route_key", routeKey)
+	}
 	// Token model redirect: the client-facing model name is the token owner's own
 	// configuration, so it is public in their consume/error logs.
 	if clientModel := common.GetContextKeyString(ctx, constant.ContextKeyTokenModelMappingClientModel); clientModel != "" {

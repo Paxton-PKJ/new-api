@@ -512,6 +512,20 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 	}
 	// 活动配置档叠加到令牌副本上：后续字段读取自然拿到叠加后的值。
 	resolved := token.ResolveActiveProfile()
+	// direct 路由预设按渠道路由身份直接选择渠道，绕过官方分组与倍率体系，因此只在
+	// 功能开关打开且令牌所有者是管理员时生效；否则整个预设按未应用处理。
+	if len(resolved.RouteKeys) > 0 {
+		allowed := common.EnableDirectChannelRouting &&
+			common.GetContextKeyInt(c, constant.ContextKeyUserRole) >= common.RoleAdminUser
+		if allowed {
+			common.SetContextKey(c, constant.ContextKeyTokenRouteChannels, resolved.RouteKeys)
+		} else {
+			// 不记录预设名，跨分组重试回到令牌原值，请求走令牌的基础路由。
+			logger.LogWarn(c, "token %d: direct route preset %q ignored (feature disabled or owner is not an administrator)", token.Id, resolved.PresetName)
+			resolved.PresetName = ""
+			resolved.Token.CrossGroupRetry = token.CrossGroupRetry
+		}
+	}
 	token = resolved.Token
 	if resolved.ProfileName != "" {
 		common.SetContextKey(c, constant.ContextKeyTokenProfile, resolved.ProfileName)

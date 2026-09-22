@@ -46,7 +46,7 @@ func GroupInUserUsableGroups(userGroup, groupName string) bool {
 }
 
 func IsUserSelectableGroup(userGroup, groupName string) bool {
-	if groupName == "" || groupName == "auto" {
+	if groupName == "" || groupName == "auto" || model.IsRouteGroup(groupName) {
 		return false
 	}
 	return GroupInUserUsableGroups(userGroup, groupName) && ratio_setting.ContainsGroupRatio(groupName)
@@ -95,6 +95,18 @@ func FilterUserTokenAutoGroups(userGroup string, groups []string) []string {
 // The absence of the context value means that the token inherits the complete
 // global Auto list; a present (even empty) value is an explicit token snapshot.
 func GetRequestAutoGroups(c *gin.Context, userGroup string) []string {
+	// direct 路由预设把 route_key 换成虚拟分组名，这是 route_key → 分组名的唯一
+	// 转换点。该上下文键只由 SetupContextForToken 的可信路径写入，因此不再经过
+	// FilterUserTokenAutoGroups 的可见性与数量裁剪。
+	if keys, ok := common.GetContextKey(c, constant.ContextKeyTokenRouteChannels); ok && common.EnableDirectChannelRouting {
+		if routeKeys, ok := keys.([]string); ok && len(routeKeys) > 0 {
+			groups := make([]string, 0, len(routeKeys))
+			for _, key := range routeKeys {
+				groups = append(groups, model.RouteGroupName(key))
+			}
+			return groups
+		}
+	}
 	value, ok := common.GetContextKey(c, constant.ContextKeyTokenAutoGroups)
 	if !ok {
 		return GetUserAutoGroup(userGroup)

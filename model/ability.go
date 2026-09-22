@@ -41,6 +41,11 @@ func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 }
 
 func GetGroupEnabledModels(group string) []string {
+	// A virtual route group has no ability rows: its models come from the channel
+	// it points at.
+	if IsRouteGroup(group) {
+		return routeGroupEnabledModels(group)
+	}
 	var models []string
 	// Find distinct models
 	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)

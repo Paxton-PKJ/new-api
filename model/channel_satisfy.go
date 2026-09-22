@@ -11,6 +11,11 @@ func IsChannelEnabledForGroupModel(group string, modelName string, channelID int
 	if group == "" || modelName == "" || channelID <= 0 {
 		return false
 	}
+	// A virtual route group points at one channel and has no ability rows.
+	if IsRouteGroup(group) {
+		channel := resolveRouteGroupChannel(group, modelName, nil)
+		return channel != nil && channel.Id == channelID
+	}
 	if !common.MemoryCacheEnabled {
 		return isChannelEnabledForGroupModelDB(group, modelName, channelID)
 	}

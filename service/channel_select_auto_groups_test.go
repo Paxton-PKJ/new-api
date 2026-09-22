@@ -89,6 +89,27 @@ func createChannelSelectAutoGroupsChannel(t *testing.T, db *gorm.DB, id int, gro
 	}).Error)
 }
 
+// A direct route preset bills and logs under the token owner's user group: the
+// virtual group name stays in the request context for internal use only.
+func TestExposeSelectedGroupReportsTheVisibleGroup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+
+	assert.Equal(t, "vip", ExposeSelectedGroup(ctx, "vip"))
+	assert.Equal(t, "vip", common.GetContextKeyString(ctx, constant.ContextKeyAutoGroup))
+	for _, key := range []constant.ContextKey{constant.ContextKeySelectedRouteGroup, constant.ContextKeyRouteKey} {
+		_, ok := common.GetContextKey(ctx, key)
+		assert.False(t, ok, "an ordinary group leaves %s unset", key)
+	}
+
+	assert.Equal(t, "default", ExposeSelectedGroup(ctx, "__route_ch_0123456789AbCdEf"),
+		"a virtual route group is reported as the user group")
+	assert.Equal(t, "default", common.GetContextKeyString(ctx, constant.ContextKeyAutoGroup))
+	assert.Equal(t, "__route_ch_0123456789AbCdEf", common.GetContextKeyString(ctx, constant.ContextKeySelectedRouteGroup))
+	assert.Equal(t, "ch_0123456789AbCdEf", common.GetContextKeyString(ctx, constant.ContextKeyRouteKey))
+}
+
 func TestCacheGetRandomSatisfiedChannelUsesTokenAutoGroupsWhenGlobalAutoIsEmpty(t *testing.T) {
 	db := setupChannelSelectAutoGroupsTest(t)
 	const modelName = "auto-groups-runtime-model"

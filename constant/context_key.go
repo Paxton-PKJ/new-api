@@ -25,6 +25,9 @@ const (
 	ContextKeyTokenModelMappingClientModel ContextKey = "token_model_mapping_client_model" // 值类型 string，仅在映射命中时设置（Task B）
 	ContextKeyTokenProfile                 ContextKey = "token_profile"                    // 值类型 string，仅在活动配置档生效时设置（Task G）
 	ContextKeyTokenRoutePreset             ContextKey = "token_route_preset"               // 值类型 string，仅在活动路由预设生效时设置（Task G）
+	ContextKeyTokenRouteChannels           ContextKey = "token_route_channels"             // 值类型 []string，仅在 direct 路由预设生效时设置（Task P）
+	ContextKeySelectedRouteGroup           ContextKey = "selected_route_group"             // 值类型 string，本次选中的虚拟路由分组名（Task P）
+	ContextKeyRouteKey                     ContextKey = "route_key"                        // 值类型 string，本次选中的渠道路由身份（Task P）
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"
@@ -57,6 +60,7 @@ const (
 	ContextKeyUserGroup   ContextKey = "user_group"
 	ContextKeyUsingGroup  ContextKey = "group"
 	ContextKeyUserName    ContextKey = "username"
+	ContextKeyUserRole    ContextKey = "user_role"
 
 	ContextKeyLocalCountTokens ContextKey = "local_count_tokens"
 

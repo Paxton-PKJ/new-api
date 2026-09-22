@@ -165,8 +165,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				param.SetRetry(0)
 				continue
 			}
-			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroup, autoGroup)
-			selectGroup = autoGroup
+			selectGroup = ExposeSelectedGroup(param.Ctx, autoGroup)
 			logger.LogDebug(param.Ctx, "Auto selected group: %s", autoGroup)
 
 			// Prepare state for next retry
@@ -322,8 +321,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 					userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 					for _, g := range GetRequestAutoGroups(c, userGroup) {
 						if model.IsChannelEnabledForGroupModel(g, modelName, preferred.Id) {
-							selectGroup = g
-							common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
+							selectGroup = ExposeSelectedGroup(c, g)
 							channel = preferred
 							affinityUsable = true
 							MarkChannelAffinityUsed(c, g, preferred.Id)

@@ -316,12 +316,14 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 
 // A token model redirect is the token owner's own configuration, so the
 // client-facing model name is public in their consume and error logs. The
-// active routing profile and route preset are recorded by name only.
+// active routing profile and route preset are recorded by name only, while the
+// channel a direct route preset resolved to stays admin-only.
 func TestAppendRelayLogAdminInfoExposesTokenMappedClientModel(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	common.SetContextKey(c, constant.ContextKeyTokenModelMappingClientModel, "claude-opus-4-8")
 	common.SetContextKey(c, constant.ContextKeyTokenProfile, "dsv4f")
 	common.SetContextKey(c, constant.ContextKeyTokenRoutePreset, "normal")
+	common.SetContextKey(c, constant.ContextKeyRouteKey, "ch_0123456789AbCdEf")
 	mapped := model.NewLogOther()
 	AppendRelayLogAdminInfo(c, nil, mapped)
 	snapshot := mapped.Snapshot()
@@ -330,6 +332,8 @@ func TestAppendRelayLogAdminInfoExposesTokenMappedClientModel(t *testing.T) {
 	assert.Equal(t, "normal", snapshot["route_preset"])
 	adminInfo, ok := snapshot["admin_info"].(map[string]any)
 	require.True(t, ok)
+	assert.Equal(t, "ch_0123456789AbCdEf", adminInfo["route_key"],
+		"the resolved channel identity identifies a channel, so it is admin-only")
 	assert.NotContains(t, adminInfo, "client_model", "the client model is displayed to the token owner, not admin-only")
 	assert.NotContains(t, adminInfo, "token_profile")
 	assert.NotContains(t, adminInfo, "route_preset")
@@ -341,4 +345,5 @@ func TestAppendRelayLogAdminInfoExposesTokenMappedClientModel(t *testing.T) {
 	assert.NotContains(t, unmappedSnapshot, "client_model")
 	assert.NotContains(t, unmappedSnapshot, "token_profile")
 	assert.NotContains(t, unmappedSnapshot, "route_preset")
+	assert.NotContains(t, unmappedSnapshot["admin_info"], "route_key", "a request without direct routing carries no route key")
 }

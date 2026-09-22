@@ -19,6 +19,10 @@ import (
 
 var group2model2channels map[string]map[string][]int // enabled channel
 var channelsIDM map[int]*Channel                     // all channels include disabled
+// routeKey2channelID indexes channels by their stable route identity. Like
+// channelsIDM it keeps disabled channels; state is checked when resolving.
+var routeKey2channelID map[string]int
+
 // channel2advancedCustomConfig caches parsed Advanced Custom (type 58) configs so
 // path-aware selection avoids re-parsing JSON per request. Refreshed on full sync.
 var channel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig
@@ -31,11 +35,15 @@ func InitChannelCache() {
 		return
 	}
 	newChannelId2channel := make(map[int]*Channel)
+	newRouteKey2channelID := make(map[string]int)
 	newChannel2advancedCustomConfig := make(map[int]*kitdto.AdvancedCustomConfig)
 	var channels []*Channel
 	DB.Find(&channels)
 	for _, channel := range channels {
 		newChannelId2channel[channel.Id] = channel
+		if key := channel.GetRouteKey(); key != "" {
+			newRouteKey2channelID[key] = channel.Id
+		}
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
 			if config := channel.GetOtherSettings().AdvancedCustom; config != nil {
 				newChannel2advancedCustomConfig[channel.Id] = config
@@ -95,6 +103,7 @@ func InitChannelCache() {
 		}
 	}
 	channelsIDM = newChannelId2channel
+	routeKey2channelID = newRouteKey2channelID
 	channel2advancedCustomConfig = newChannel2advancedCustomConfig
 	channelSyncLock.Unlock()
 	// Lock ordering: InvalidatePricingCache acquires updatePricingLock, and
@@ -120,6 +129,12 @@ func GetRandomSatisfiedChannel(
 	retry int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
+	// A virtual route group points at exactly one channel, so it has no priority
+	// levels: retry behaves like a single-priority group and stays on that channel.
+	if IsRouteGroup(group) {
+		return resolveRouteGroupChannel(group, model, filters), nil
+	}
+
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
 		return GetChannel(group, model, retry, filters)
@@ -288,8 +303,17 @@ func CacheUpdateChannel(channel *Channel) {
 	}
 	if oldChannel, ok := channelsIDM[channel.Id]; ok {
 		logger.LogDebug(nil, "CacheUpdateChannel before: id=%d, name=%s, status=%d, polling_index=%d", channel.Id, channel.Name, channel.Status, oldChannel.ChannelInfo.MultiKeyPollingIndex)
+		if oldKey := oldChannel.GetRouteKey(); oldKey != "" {
+			delete(routeKey2channelID, oldKey)
+		}
 	}
 	channelsIDM[channel.Id] = channel
+	if routeKey2channelID == nil {
+		routeKey2channelID = make(map[string]int)
+	}
+	if key := channel.GetRouteKey(); key != "" {
+		routeKey2channelID[key] = channel.Id
+	}
 	if channel2advancedCustomConfig == nil {
 		channel2advancedCustomConfig = make(map[int]*kitdto.AdvancedCustomConfig)
 	}
