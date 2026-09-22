@@ -511,13 +511,13 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 		logger.LogWarn(c, "token %d has invalid profiles, profiles skipped", token.Id)
 	}
 	// 活动配置档叠加到令牌副本上：后续字段读取自然拿到叠加后的值。
-	effective, profileName, presetName := token.ResolveActiveProfile()
-	token = effective
-	if profileName != "" {
-		common.SetContextKey(c, constant.ContextKeyTokenProfile, profileName)
+	resolved := token.ResolveActiveProfile()
+	token = resolved.Token
+	if resolved.ProfileName != "" {
+		common.SetContextKey(c, constant.ContextKeyTokenProfile, resolved.ProfileName)
 	}
-	if presetName != "" {
-		common.SetContextKey(c, constant.ContextKeyTokenRoutePreset, presetName)
+	if resolved.PresetName != "" {
+		common.SetContextKey(c, constant.ContextKeyTokenRoutePreset, resolved.PresetName)
 	}
 	c.Set("id", token.UserId)
 	c.Set("token_id", token.Id)

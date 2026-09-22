@@ -167,6 +167,8 @@ func InitOptionMap() {
 	common.OptionMap["RetryTimes"] = strconv.Itoa(common.RetryTimes)
 	common.OptionMap["DefaultSameChannelRetryTimes"] = strconv.Itoa(common.DefaultSameChannelRetryTimes)
 	common.OptionMap["MaxTotalAttempts"] = strconv.Itoa(common.MaxTotalAttempts)
+	common.OptionMap["EnableDirectChannelRouting"] = strconv.FormatBool(common.EnableDirectChannelRouting)
+	common.OptionMap["MaxRoutePresetChannels"] = strconv.Itoa(common.MaxRoutePresetChannels)
 	common.OptionMap["DataExportInterval"] = strconv.Itoa(common.DataExportInterval)
 	common.OptionMap["DataExportDefaultTime"] = common.DataExportDefaultTime
 	common.OptionMap["DefaultCollapseSidebar"] = strconv.FormatBool(common.DefaultCollapseSidebar)
@@ -371,7 +373,7 @@ func updateOptionMap(key string, value string) (err error) {
 			common.ImageDownloadPermission = intValue
 		}
 	}
-	if strings.HasSuffix(key, "Enabled") || key == "DefaultCollapseSidebar" || key == "DefaultUseAutoGroup" || key == "SMTPForceAuthLogin" || key == "SMTPInsecureSkipVerify" {
+	if strings.HasSuffix(key, "Enabled") || key == "EnableDirectChannelRouting" || key == "DefaultCollapseSidebar" || key == "DefaultUseAutoGroup" || key == "SMTPForceAuthLogin" || key == "SMTPInsecureSkipVerify" {
 		boolValue := value == "true"
 		switch key {
 		case "PasswordRegisterEnabled":
@@ -400,6 +402,8 @@ func updateOptionMap(key string, value string) (err error) {
 			common.AutomaticDisableChannelEnabled = boolValue
 		case "AutomaticEnableChannelEnabled":
 			common.AutomaticEnableChannelEnabled = boolValue
+		case "EnableDirectChannelRouting":
+			common.EnableDirectChannelRouting = boolValue
 		case "LogConsumeEnabled":
 			common.LogConsumeEnabled = boolValue
 		case "DisplayInCurrencyEnabled":
@@ -628,6 +632,8 @@ func updateOptionMap(key string, value string) (err error) {
 		common.DefaultSameChannelRetryTimes, _ = strconv.Atoi(value)
 	case "MaxTotalAttempts":
 		common.MaxTotalAttempts, _ = strconv.Atoi(value)
+	case "MaxRoutePresetChannels":
+		common.MaxRoutePresetChannels, _ = strconv.Atoi(value)
 	case "DataExportInterval":
 		common.DataExportInterval, _ = strconv.Atoi(value)
 	case "DataExportDefaultTime":

@@ -215,20 +215,46 @@ func TestAddTokenRejectsInvalidAutoGroups(t *testing.T) {
 	}
 }
 
+type tokenAutoGroupsResponse struct {
+	Groups        []string `json:"groups"`
+	MaxCount      int      `json:"max_count"`
+	DirectRouting struct {
+		Enabled     bool `json:"enabled"`
+		MaxChannels int  `json:"max_channels"`
+		Allowed     bool `json:"allowed"`
+	} `json:"direct_routing"`
+}
+
 func TestGetTokenAutoGroupsReturnsFullFilteredGlobalOrderAndLimit(t *testing.T) {
 	configureTokenAutoGroupsTest(t, "1", `["vip","missing","default"]`)
 	user := setupTokenAutoGroupsControllerTest(t)
 
-	ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodGet, "/api/token/auto-groups", nil, user.Id)
-	GetTokenAutoGroups(ctx)
+	request := func(t *testing.T, role int) tokenAutoGroupsResponse {
+		t.Helper()
+		ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodGet, "/api/token/auto-groups", nil, user.Id)
+		if role != 0 {
+			ctx.Set("role", role)
+		}
+		GetTokenAutoGroups(ctx)
 
-	response := decodeAPIResponse(t, recorder)
-	require.True(t, response.Success, response.Message)
-	var data struct {
-		Groups   []string `json:"groups"`
-		MaxCount int      `json:"max_count"`
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var data tokenAutoGroupsResponse
+		require.NoError(t, common.Unmarshal(response.Data, &data))
+		return data
 	}
-	require.NoError(t, common.Unmarshal(response.Data, &data))
-	assert.Equal(t, []string{"vip", "default"}, data.Groups)
-	assert.Equal(t, 1, data.MaxCount)
+
+	commonUser := request(t, 0)
+	assert.Equal(t, []string{"vip", "default"}, commonUser.Groups)
+	assert.Equal(t, 1, commonUser.MaxCount)
+	// direct 预设的可用性由功能开关与调用者角色共同决定。
+	assert.False(t, commonUser.DirectRouting.Enabled)
+	assert.Equal(t, common.MaxRoutePresetChannels, commonUser.DirectRouting.MaxChannels)
+	assert.False(t, commonUser.DirectRouting.Allowed)
+
+	setDirectChannelRouting(t, true)
+	admin := request(t, common.RoleAdminUser)
+	assert.True(t, admin.DirectRouting.Enabled)
+	assert.Equal(t, common.MaxRoutePresetChannels, admin.DirectRouting.MaxChannels)
+	assert.True(t, admin.DirectRouting.Allowed)
 }

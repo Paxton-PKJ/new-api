@@ -36,6 +36,10 @@ type RequestPolicySnapshot struct {
 	// budget globals, mirrored into the common.* runtime values on every write.
 	DefaultSameChannelRetryTimes int
 	MaxTotalAttempts             int
+	// EnableDirectChannelRouting and MaxRoutePresetChannels gate route presets
+	// that select channels by route_key, mirrored into the common.* globals.
+	EnableDirectChannelRouting bool
+	MaxRoutePresetChannels     int
 }
 
 var requestPolicySnapshot atomic.Pointer[RequestPolicySnapshot]
@@ -59,6 +63,8 @@ func requestPolicyDefaultOptions() map[string]string {
 	defaults["RetryTimes"] = strconv.Itoa(common.RetryTimes)
 	defaults["DefaultSameChannelRetryTimes"] = strconv.Itoa(common.DefaultSameChannelRetryTimes)
 	defaults["MaxTotalAttempts"] = strconv.Itoa(common.MaxTotalAttempts)
+	defaults["EnableDirectChannelRouting"] = strconv.FormatBool(common.EnableDirectChannelRouting)
+	defaults["MaxRoutePresetChannels"] = strconv.Itoa(common.MaxRoutePresetChannels)
 	defaults["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
 	defaults["AutomaticDisableStatusCodes"] = operation_setting.AutomaticDisableStatusCodesToString()
 	defaults["AutomaticDisableKeywords"] = operation_setting.AutomaticDisableKeywordsToString()
@@ -76,7 +82,7 @@ func IsRequestPolicyOption(key string) bool {
 		return true
 	}
 	switch key {
-	case "CheckSensitiveEnabled", "CheckSensitiveOnPromptEnabled", "SensitiveWords", "AutomaticEnableChannelEnabled", "ChannelDisableThreshold", "monitor_setting.auto_test_channel_enabled", "monitor_setting.auto_test_channel_minutes", "monitor_setting.channel_test_concurrency", "monitor_setting.channel_test_mode", "RetryTimes", "DefaultSameChannelRetryTimes", "MaxTotalAttempts", "AutomaticRetryStatusCodes", "AutomaticDisableChannelEnabled", "AutomaticDisableStatusCodes", "AutomaticDisableKeywords":
+	case "CheckSensitiveEnabled", "CheckSensitiveOnPromptEnabled", "SensitiveWords", "AutomaticEnableChannelEnabled", "ChannelDisableThreshold", "monitor_setting.auto_test_channel_enabled", "monitor_setting.auto_test_channel_minutes", "monitor_setting.channel_test_concurrency", "monitor_setting.channel_test_mode", "RetryTimes", "DefaultSameChannelRetryTimes", "MaxTotalAttempts", "EnableDirectChannelRouting", "MaxRoutePresetChannels", "AutomaticRetryStatusCodes", "AutomaticDisableChannelEnabled", "AutomaticDisableStatusCodes", "AutomaticDisableKeywords":
 		return true
 	}
 	return false
@@ -144,6 +150,14 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	snapshot.MaxTotalAttempts, err = strconv.Atoi(raw["MaxTotalAttempts"])
 	if err != nil || snapshot.MaxTotalAttempts < 0 || snapshot.MaxTotalAttempts > 999 {
 		return nil, fmt.Errorf("max total attempts must be an integer between 0 and 999")
+	}
+	snapshot.EnableDirectChannelRouting, err = strconv.ParseBool(raw["EnableDirectChannelRouting"])
+	if err != nil {
+		return nil, fmt.Errorf("invalid boolean: EnableDirectChannelRouting")
+	}
+	snapshot.MaxRoutePresetChannels, err = strconv.Atoi(raw["MaxRoutePresetChannels"])
+	if err != nil || snapshot.MaxRoutePresetChannels < 1 || snapshot.MaxRoutePresetChannels > 64 {
+		return nil, fmt.Errorf("max route preset channels must be an integer between 1 and 64")
 	}
 	snapshot.AutoDisable, err = strconv.ParseBool(raw["AutomaticDisableChannelEnabled"])
 	if err != nil {
@@ -248,6 +262,18 @@ func UpdateRequestPolicyOptions(values map[string]string) error {
 	snapshot, err := BuildRequestPolicy(options)
 	if err != nil {
 		return err
+	}
+	// 关闭直接渠道路由前先确认没有令牌的活动预设仍在引用渠道；有则整体拒绝，
+	// 不落库、不改内存值，令牌不会在毫无提示的情况下退回基础路由。判定用校验后的
+	// 结果值而不是请求里的字面量，"0"/"False" 这类写法同样受保护。
+	if !snapshot.EnableDirectChannelRouting && common.EnableDirectChannelRouting {
+		affected, err := CountTokensWithActiveDirectRoutePreset()
+		if err != nil {
+			return err
+		}
+		if affected > 0 {
+			return fmt.Errorf("direct channel routing is still used by %d token(s); switch their active route presets first", affected)
+		}
 	}
 	if err := DB.Transaction(func(tx *gorm.DB) error {
 		for key, value := range values {

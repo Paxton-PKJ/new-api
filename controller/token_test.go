@@ -865,10 +865,40 @@ func setupTokenProfilesTestGroups(t *testing.T) {
 	})
 }
 
+// profilesRouteKey 是 profiles 用例里真实渠道的路由身份，direct 预设引用它。
+const profilesRouteKey = "ch_0123456789AbCdEf"
+
+// seedRouteKeyChannel 插入一条带该路由身份的真实渠道，供 direct 预设的渠道校验使用。
+func seedRouteKeyChannel(t *testing.T, db *gorm.DB, routeKey string) {
+	t.Helper()
+
+	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+	channel := model.Channel{
+		Name:     "profiles-route-channel",
+		Key:      "sk-profiles-route",
+		Status:   common.ChannelStatusEnabled,
+		Group:    "default",
+		RouteKey: common.GetPointer(routeKey),
+	}
+	require.NoError(t, db.Create(&channel).Error)
+	require.Equal(t, routeKey, channel.GetRouteKey())
+}
+
+// setDirectChannelRouting 在用例内切换直接渠道路由开关，用例结束自动还原。
+func setDirectChannelRouting(t *testing.T, enabled bool) {
+	t.Helper()
+
+	previous := common.EnableDirectChannelRouting
+	common.EnableDirectChannelRouting = enabled
+	t.Cleanup(func() { common.EnableDirectChannelRouting = previous })
+}
+
 func TestAddTokenProfilesValidation(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	invalidMessagePrefix := i18n.Translate(i18n.LangEn, i18n.MsgTokenProfilesInvalid, map[string]any{"Error": ""})
 	requireAutoGroupMessage := i18n.Translate(i18n.LangEn, i18n.MsgTokenProfilesRequireAutoGroup)
+	directDisabledMessage := i18n.Translate(i18n.LangEn, i18n.MsgTokenRoutePresetDirectDisabled)
+	directAdminOnlyMessage := i18n.Translate(i18n.LangEn, i18n.MsgTokenRoutePresetDirectAdminOnly)
 	setupTokenProfilesTestGroups(t)
 
 	fullDocument := `{
@@ -906,10 +936,32 @@ func TestAddTokenProfilesValidation(t *testing.T) {
 			{Name: "p", ModelMapping: map[string]string{"a": "b"}, ModelLimits: []string{"gpt-4o"}},
 		},
 	}
+	directDocument := `{"profiles":[{"name":"p","active_route_preset":"direct","route_presets":[{"name":"direct","route_keys":["` + profilesRouteKey + `"],"cross_group_retry":true}]}]}`
+	directStored := &model.TokenProfileConfig{
+		Profiles: []model.TokenProfile{{
+			Name:              "p",
+			ActiveRoutePreset: "direct",
+			RoutePresets: []model.TokenRoutePreset{
+				{Name: "direct", RouteKeys: []string{profilesRouteKey}, CrossGroupRetry: true},
+			},
+		}},
+	}
+
+	var tooManyRouteKeys strings.Builder
+	tooManyRouteKeys.WriteString(`{"profiles":[{"name":"p","route_presets":[{"name":"direct","route_keys":[`)
+	for i := range common.MaxRoutePresetChannels + 1 {
+		if i > 0 {
+			tooManyRouteKeys.WriteString(",")
+		}
+		fmt.Fprintf(&tooManyRouteKeys, `"ch_%016d"`, i)
+	}
+	tooManyRouteKeys.WriteString(`]}]}]}`)
 
 	tests := []struct {
 		name          string
 		group         string
+		role          int
+		directRouting bool
 		includeField  bool
 		value         json.RawMessage
 		wantStored    *model.TokenProfileConfig
@@ -948,11 +1000,43 @@ func TestAddTokenProfilesValidation(t *testing.T) {
 			value:         json.RawMessage(`{"profiles":[{"name":"dsv4f","model_mapping":{"a":"b","b":"a"}}]}`),
 			wantErrorPart: `profile "dsv4f": token model mapping contains a cycle`,
 		},
+		{
+			name: "direct preset while the feature is off", group: "auto", role: common.RoleAdminUser, includeField: true,
+			value:       json.RawMessage(directDocument),
+			wantMessage: directDisabledMessage,
+		},
+		{
+			name: "direct preset requires an administrator", group: "auto", directRouting: true, includeField: true,
+			value:       json.RawMessage(directDocument),
+			wantMessage: directAdminOnlyMessage,
+		},
+		{
+			name: "direct preset with an unknown route key", group: "auto", role: common.RoleAdminUser, directRouting: true, includeField: true,
+			value:         json.RawMessage(`{"profiles":[{"name":"p","route_presets":[{"name":"direct","route_keys":["ch_UnknownRouteKey1"]}]}]}`),
+			wantErrorPart: `profile "p": route preset "direct": route key "ch_UnknownRouteKey1" does not match any channel`,
+		},
+		{
+			name: "direct preset above the channel limit", group: "auto", role: common.RoleAdminUser, directRouting: true, includeField: true,
+			value:         json.RawMessage(tooManyRouteKeys.String()),
+			wantErrorPart: "selects more than 10 channels",
+		},
+		{
+			name: "valid direct preset", group: "auto", role: common.RoleAdminUser, directRouting: true, includeField: true,
+			value:      json.RawMessage(directDocument),
+			wantStored: directStored,
+		},
+		{
+			name: "direct preset with a non auto group token", group: "default", role: common.RoleAdminUser, directRouting: true, includeField: true,
+			value:       json.RawMessage(directDocument),
+			wantMessage: requireAutoGroupMessage,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			setupTokenControllerTestDB(t)
+			db := setupTokenControllerTestDB(t)
+			seedRouteKeyChannel(t, db, profilesRouteKey)
+			setDirectChannelRouting(t, test.directRouting)
 			request := map[string]any{
 				"name":            "profiles-" + test.name,
 				"expired_time":    -1,
@@ -966,6 +1050,9 @@ func TestAddTokenProfilesValidation(t *testing.T) {
 
 			ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", request, 1)
 			common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+			if test.role != 0 {
+				ctx.Set("role", test.role)
+			}
 			AddToken(ctx)
 			response := decodeAPIResponse(t, recorder)
 
@@ -997,6 +1084,18 @@ func TestAddTokenProfilesValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, token.Profiles)
 			assert.Equal(t, string(expected), *token.Profiles)
+
+			// 详情接口回读的文档必须与落库字节一致（route_keys 原样返回）。
+			getCtx, getRecorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
+			getCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+			GetToken(getCtx)
+			getResponse := decodeAPIResponse(t, getRecorder)
+			require.True(t, getResponse.Success, getResponse.Message)
+			var detail struct {
+				Profiles *model.TokenProfileConfig `json:"profiles"`
+			}
+			require.NoError(t, common.Unmarshal(getResponse.Data, &detail))
+			assert.Equal(t, test.wantStored, detail.Profiles)
 		})
 	}
 }
@@ -1005,6 +1104,7 @@ func TestUpdateTokenProfilesTriStateAndSwitch(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	setupTokenProfilesTestGroups(t)
 	db := setupTokenControllerTestDB(t)
+	seedRouteKeyChannel(t, db, profilesRouteKey)
 
 	token := seedToken(t, db, 1, "profiles-token", "profiles-token-key")
 	token.Group = "auto"
@@ -1017,6 +1117,7 @@ func TestUpdateTokenProfilesTriStateAndSwitch(t *testing.T) {
 				RoutePresets: []model.TokenRoutePreset{
 					{Name: "normal", AutoGroups: []string{"fengwind", "agent"}},
 					{Name: "agent-first", AutoGroups: []string{"agent"}, CrossGroupRetry: true},
+					{Name: "direct", RouteKeys: []string{profilesRouteKey}},
 				},
 				ActiveRoutePreset: "normal",
 			},
@@ -1042,12 +1143,19 @@ func TestUpdateTokenProfilesTriStateAndSwitch(t *testing.T) {
 			"cross_group_retry":    false,
 		}
 	}
-	put := func(t *testing.T, target string, body map[string]any) (*gin.Context, tokenAPIResponse) {
+	putAs := func(t *testing.T, role int, target string, body map[string]any) (*gin.Context, tokenAPIResponse) {
 		t.Helper()
 		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, target, body, 1)
 		common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+		if role != 0 {
+			ctx.Set("role", role)
+		}
 		UpdateToken(ctx)
 		return ctx, decodeAPIResponse(t, recorder)
+	}
+	put := func(t *testing.T, target string, body map[string]any) (*gin.Context, tokenAPIResponse) {
+		t.Helper()
+		return putAs(t, 0, target, body)
 	}
 	storedToken := func(t *testing.T) model.Token {
 		t.Helper()
@@ -1089,12 +1197,15 @@ func TestUpdateTokenProfilesTriStateAndSwitch(t *testing.T) {
 					"route_presets": []any{
 						map[string]any{"name": "normal", "auto_groups": []string{"fengwind", "agent"}},
 						map[string]any{"name": "agent-first", "auto_groups": []string{"agent"}, "cross_group_retry": true},
+						map[string]any{"name": "direct", "route_keys": []string{profilesRouteKey}},
 					},
 				},
 				map[string]any{"name": "f5.1"},
 			},
 		}
-		ctx, response := put(t, "/api/token/", body)
+		// 含 direct 预设的文档只能由管理员在开关打开时保存。
+		setDirectChannelRouting(t, true)
+		ctx, response := putAs(t, common.RoleAdminUser, "/api/token/", body)
 		require.True(t, response.Success, response.Message)
 		assert.Contains(t, tokenUpdatedFields(t, ctx), "profiles")
 
@@ -1105,8 +1216,9 @@ func TestUpdateTokenProfilesTriStateAndSwitch(t *testing.T) {
 		require.NotNil(t, detail.Profiles)
 		require.Len(t, detail.Profiles.Profiles, 2)
 		assert.Equal(t, "dsv4f", detail.Profiles.ActiveProfile)
-		require.Len(t, detail.Profiles.Profiles[0].RoutePresets, 2)
+		require.Len(t, detail.Profiles.Profiles[0].RoutePresets, 3)
 		assert.Equal(t, []string{"fengwind", "agent"}, detail.Profiles.Profiles[0].RoutePresets[0].AutoGroups)
+		assert.Equal(t, []string{profilesRouteKey}, detail.Profiles.Profiles[0].RoutePresets[2].RouteKeys)
 		assert.Equal(t, "normal", detail.Profiles.Profiles[0].ActiveRoutePreset)
 
 		stored := storedToken(t)
@@ -1189,6 +1301,45 @@ func TestUpdateTokenProfilesTriStateAndSwitch(t *testing.T) {
 		stored := storedToken(t)
 		require.NotNil(t, stored.Profiles)
 		assert.Equal(t, storedDocument, *stored.Profiles)
+	})
+
+	t.Run("profile only switch to a direct preset is rejected while the feature is off", func(t *testing.T) {
+		_, response := putAs(t, common.RoleAdminUser, "/api/token/?profile_only=true", map[string]any{"id": token.Id, "active_route_preset": "direct"})
+		require.False(t, response.Success)
+		assert.Equal(t, i18n.Translate(i18n.LangEn, i18n.MsgTokenRoutePresetDirectDisabled), response.Message)
+		stored := storedToken(t)
+		require.NotNil(t, stored.Profiles)
+		assert.Equal(t, storedDocument, *stored.Profiles)
+	})
+
+	t.Run("profile only switch to a direct preset requires an administrator", func(t *testing.T) {
+		setDirectChannelRouting(t, true)
+		_, response := put(t, "/api/token/?profile_only=true", map[string]any{"id": token.Id, "active_route_preset": "direct"})
+		require.False(t, response.Success)
+		assert.Equal(t, i18n.Translate(i18n.LangEn, i18n.MsgTokenRoutePresetDirectAdminOnly), response.Message)
+		stored := storedToken(t)
+		require.NotNil(t, stored.Profiles)
+		assert.Equal(t, storedDocument, *stored.Profiles)
+	})
+
+	t.Run("profile only switch to a direct preset records the switch", func(t *testing.T) {
+		setDirectChannelRouting(t, true)
+		ctx, response := putAs(t, common.RoleAdminUser, "/api/token/?profile_only=true", map[string]any{"id": token.Id, "active_route_preset": "direct"})
+		require.True(t, response.Success, response.Message)
+		assert.Equal(t, "direct", tokenAuditParams(ctx)["to_route_preset"])
+
+		stored := storedToken(t)
+		require.NotNil(t, stored.Profiles)
+		config, err := model.ParseTokenProfiles(*stored.Profiles)
+		require.NoError(t, err)
+		require.NotNil(t, config)
+		require.Len(t, config.Profiles[0].RoutePresets, 3)
+		assert.Equal(t, []string{profilesRouteKey}, config.Profiles[0].RoutePresets[2].RouteKeys)
+
+		// 切回 legacy 预设，后续用例继续沿用原始状态。
+		_, response = put(t, "/api/token/?profile_only=true", map[string]any{"id": token.Id, "active_route_preset": "agent-first"})
+		require.True(t, response.Success, response.Message)
+		assert.Equal(t, storedDocument, *storedToken(t).Profiles, "switching back restores the same document")
 	})
 
 	t.Run("profile only switch rejects an unknown profile", func(t *testing.T) {

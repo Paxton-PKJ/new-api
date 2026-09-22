@@ -54,6 +54,7 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			initCol()
 			t.Cleanup(func() {
 				require.NoError(t, db.Migrator().DropTable(&Option{}))
+				require.NoError(t, db.Migrator().DropTable(&Token{}))
 				for k, v := range previousSnapshot.Options {
 					require.NoError(t, updateOptionMap(k, v))
 				}
@@ -134,6 +135,43 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			assert.Equal(t, "2", option.Value)
 			loadOptionsFromDatabase()
 			assert.Equal(t, "strict", CurrentRequestPolicy().Affinity.SessionMode, "a failed save keeps the persisted global mode")
+
+			// 直接渠道路由：开关默认关闭、渠道数量有范围，关闭时若仍有令牌在用则整体拒绝。
+			directSnapshot := CurrentRequestPolicy()
+			assert.False(t, directSnapshot.EnableDirectChannelRouting)
+			assert.Equal(t, 10, directSnapshot.MaxRoutePresetChannels)
+			for _, value := range []string{"0", "65", "x"} {
+				assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"MaxRoutePresetChannels": value}))
+			}
+			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"EnableDirectChannelRouting": "yes"}))
+			assert.Same(t, directSnapshot, CurrentRequestPolicy(), "rejected direct routing options keep the snapshot")
+			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"EnableDirectChannelRouting": "true", "MaxRoutePresetChannels": "5"}))
+			assert.True(t, common.EnableDirectChannelRouting, "the runtime global follows the same write")
+			assert.Equal(t, 5, common.MaxRoutePresetChannels)
+
+			require.NoError(t, db.AutoMigrate(&Token{}))
+			directToken := Token{UserId: 7, Key: "direct-guard-key", Name: "direct-guard", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}
+			require.NoError(t, directToken.SetProfileConfig(&TokenProfileConfig{
+				ActiveProfile: "p",
+				Profiles: []TokenProfile{{
+					Name:              "p",
+					ActiveRoutePreset: "direct",
+					RoutePresets:      []TokenRoutePreset{{Name: "direct", RouteKeys: []string{"ch_0123456789AbCdEf"}}},
+				}},
+			}))
+			require.NoError(t, directToken.Insert())
+			err = UpdateRequestPolicyOptions(map[string]string{"EnableDirectChannelRouting": "false"})
+			require.Error(t, err)
+			assert.EqualError(t, err, "direct channel routing is still used by 1 token(s); switch their active route presets first")
+			assert.True(t, common.EnableDirectChannelRouting, "a rejected disable keeps the runtime global on")
+			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"EnableDirectChannelRouting": "False"}),
+				"the guard follows the parsed value, not the request literal")
+			assert.True(t, common.EnableDirectChannelRouting)
+
+			require.NoError(t, directToken.SetProfileConfig(nil))
+			require.NoError(t, directToken.Update())
+			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"EnableDirectChannelRouting": "false", "MaxRoutePresetChannels": "10"}))
+			assert.False(t, common.EnableDirectChannelRouting, "the switch turns off once no token uses it")
 		})
 	}
 }

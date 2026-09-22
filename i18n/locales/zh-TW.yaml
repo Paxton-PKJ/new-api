@@ -59,6 +59,8 @@ token.profiles_invalid: "路由設定檔無效：{{.Error}}"
 token.profiles_require_auto_group: "路由預設僅在令牌分組為 auto 時可用"
 token.profile_not_found: "路由設定檔 {{.Name}} 不存在"
 token.route_preset_not_found: "設定檔 {{.Profile}} 中不存在路由預設 {{.Name}}"
+token.route_preset_direct_disabled: "本實例未開啟直接管道路由"
+token.route_preset_direct_admin_only: "只有管理員可以設定直接選擇管道的路由預設"
 
 # Redemption messages
 redemption.name_length: "兌換碼名稱長度必須在1-20之間"

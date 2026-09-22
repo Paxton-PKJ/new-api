@@ -59,6 +59,8 @@ token.profiles_invalid: "路由配置档无效：{{.Error}}"
 token.profiles_require_auto_group: "路由预设仅在令牌分组为 auto 时可用"
 token.profile_not_found: "路由配置档 {{.Name}} 不存在"
 token.route_preset_not_found: "配置档 {{.Profile}} 中不存在路由预设 {{.Name}}"
+token.route_preset_direct_disabled: "本实例未开启直接渠道路由"
+token.route_preset_direct_admin_only: "只有管理员可以配置直接选择渠道的路由预设"
 
 # Redemption messages
 redemption.name_length: "兑换码名称长度必须在1-20之间"

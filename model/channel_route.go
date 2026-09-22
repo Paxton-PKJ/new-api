@@ -56,6 +56,26 @@ func ListChannelRouteOptions() ([]ChannelRouteOption, error) {
 	return options, nil
 }
 
+// ChannelsByRouteKeys 返回给定路由身份到渠道 id 的映射，未知身份不出现在结果里。
+// 供保存路由预设时一次性校验引用的渠道是否存在。
+func ChannelsByRouteKeys(keys []string) (map[string]int, error) {
+	known := make(map[string]int, len(keys))
+	if len(keys) == 0 {
+		return known, nil
+	}
+	var channels []Channel
+	if err := DB.Model(&Channel{}).
+		Select("id, route_key").
+		Where("route_key IN ?", keys).
+		Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	for i := range channels {
+		known[channels[i].GetRouteKey()] = channels[i].Id
+	}
+	return known, nil
+}
+
 // BackfillChannelRouteKeys 为缺少 route_key 的历史渠道补齐路由身份，
 // 返回本次填充的行数。已有值的行不会被改动，重复调用是幂等的。
 func BackfillChannelRouteKeys() (int, error) {

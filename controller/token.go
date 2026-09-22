@@ -189,8 +189,9 @@ func setTokenModelMapping(c *gin.Context, token *model.Token, input tokenModelMa
 }
 
 // setTokenProfiles 应用 profiles 三态输入：字段缺省时保留，null 清空，有值时严格校验后整体替换。
-// 文档校验由 model.ParseTokenProfiles 完成，这里补上依赖请求上下文的三条规则：
-// 路由预设的分组数量上限、分组是否在当前用户可选范围内、以及带预设的配置档只允许用于 auto 分组令牌。
+// 文档校验由 model.ParseTokenProfiles 完成，这里补上依赖请求上下文与系统设置的规则：
+// 路由预设的数量上限（分组或渠道）、分组是否在当前用户可选范围内、渠道是否真实存在、
+// 功能开关与管理员身份，以及带预设的配置档只允许用于 auto 分组令牌。
 func setTokenProfiles(c *gin.Context, token *model.Token, input tokenProfilesInput) bool {
 	if !input.Set {
 		return true
@@ -207,9 +208,34 @@ func setTokenProfiles(c *gin.Context, token *model.Token, input tokenProfilesInp
 	if config != nil {
 		maxAutoGroups := setting.GetMaxTokenAutoGroups()
 		hasRoutePresets := false
+		var directKeys []string
+		seenRouteKeys := make(map[string]struct{})
 		for _, profile := range config.Profiles {
 			for _, preset := range profile.RoutePresets {
 				hasRoutePresets = true
+				if preset.IsDirect() {
+					if !common.EnableDirectChannelRouting {
+						common.ApiErrorI18n(c, i18n.MsgTokenRoutePresetDirectDisabled)
+						return false
+					}
+					if c.GetInt("role") < common.RoleAdminUser {
+						common.ApiErrorI18n(c, i18n.MsgTokenRoutePresetDirectAdminOnly)
+						return false
+					}
+					if len(preset.RouteKeys) > common.MaxRoutePresetChannels {
+						common.ApiErrorI18n(c, i18n.MsgTokenProfilesInvalid, map[string]any{
+							"Error": fmt.Sprintf("profile %q: route preset %q selects more than %d channels", profile.Name, preset.Name, common.MaxRoutePresetChannels),
+						})
+						return false
+					}
+					for _, key := range preset.RouteKeys {
+						if _, ok := seenRouteKeys[key]; !ok {
+							seenRouteKeys[key] = struct{}{}
+							directKeys = append(directKeys, key)
+						}
+					}
+					continue
+				}
 				if len(preset.AutoGroups) > maxAutoGroups {
 					common.ApiErrorI18n(c, i18n.MsgTokenProfilesInvalid, map[string]any{
 						"Error": fmt.Sprintf("profile %q: route preset %q selects more than %d auto groups", profile.Name, preset.Name, maxAutoGroups),
@@ -222,6 +248,26 @@ func setTokenProfiles(c *gin.Context, token *model.Token, input tokenProfilesInp
 			if token.Group != "auto" {
 				common.ApiErrorI18n(c, i18n.MsgTokenProfilesRequireAutoGroup)
 				return false
+			}
+			if len(directKeys) > 0 {
+				// 一次查询校验全部引用的渠道；不要求渠道启用，停用的渠道属于运行时容错范围。
+				known, err := model.ChannelsByRouteKeys(directKeys)
+				if err != nil {
+					common.ApiError(c, err)
+					return false
+				}
+				for _, profile := range config.Profiles {
+					for _, preset := range profile.RoutePresets {
+						for _, key := range preset.RouteKeys {
+							if _, ok := known[key]; !ok {
+								common.ApiErrorI18n(c, i18n.MsgTokenProfilesInvalid, map[string]any{
+									"Error": fmt.Sprintf("profile %q: route preset %q: route key %q does not match any channel", profile.Name, preset.Name, key),
+								})
+								return false
+							}
+						}
+					}
+				}
 			}
 			userGroup, err := getTokenRequestUserGroup(c)
 			if err != nil {
@@ -292,9 +338,22 @@ func applyTokenActiveProfile(c *gin.Context, token *model.Token, activeProfile, 
 		if name == "" {
 			profile.ActiveRoutePreset = ""
 		} else {
-			if !slices.ContainsFunc(profile.RoutePresets, func(preset model.TokenRoutePreset) bool { return preset.Name == name }) {
+			presetIndex := slices.IndexFunc(profile.RoutePresets, func(preset model.TokenRoutePreset) bool { return preset.Name == name })
+			if presetIndex < 0 {
 				common.ApiErrorI18n(c, i18n.MsgTokenRoutePresetNotFound, map[string]any{"Name": name, "Profile": activeName})
 				return false
+			}
+			// direct 预设只在开关打开且调用者是管理员时可切换；渠道是否仍存在由
+			// 保存时校验负责，这里放行已失效的引用，运行时会退化为基础路由。
+			if profile.RoutePresets[presetIndex].IsDirect() {
+				if !common.EnableDirectChannelRouting {
+					common.ApiErrorI18n(c, i18n.MsgTokenRoutePresetDirectDisabled)
+					return false
+				}
+				if c.GetInt("role") < common.RoleAdminUser {
+					common.ApiErrorI18n(c, i18n.MsgTokenRoutePresetDirectAdminOnly)
+					return false
+				}
 			}
 			profile.ActiveRoutePreset = name
 		}
@@ -375,6 +434,11 @@ func GetTokenAutoGroups(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{
 		"groups":    service.GetUserAutoGroup(userGroup),
 		"max_count": setting.GetMaxTokenAutoGroups(),
+		"direct_routing": gin.H{
+			"enabled":      common.EnableDirectChannelRouting,
+			"max_channels": common.MaxRoutePresetChannels,
+			"allowed":      c.GetInt("role") >= common.RoleAdminUser,
+		},
 	})
 }
 

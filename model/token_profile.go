@@ -21,12 +21,17 @@ const (
 	MaxTokenProfilesBytes = 64 << 10
 )
 
-// TokenRoutePreset 是配置档内的一组自动分组路由参数。
+// TokenRoutePreset 是配置档内的一组路由参数：要么按官方分组（auto_groups），
+// 要么按渠道路由身份（route_keys）直接选择渠道，两者恰好配置一个。
 type TokenRoutePreset struct {
 	Name            string   `json:"name"`
-	AutoGroups      []string `json:"auto_groups"`
+	AutoGroups      []string `json:"auto_groups,omitempty"`
+	RouteKeys       []string `json:"route_keys,omitempty"`
 	CrossGroupRetry bool     `json:"cross_group_retry"`
 }
+
+// IsDirect 表示预设按渠道路由身份直接选择渠道，而不是按官方分组。
+func (preset TokenRoutePreset) IsDirect() bool { return len(preset.RouteKeys) > 0 }
 
 // TokenProfile 是一套可整体切换到令牌上的路由配置。
 type TokenProfile struct {
@@ -83,52 +88,104 @@ func (token *Token) SetProfileConfig(config *TokenProfileConfig) error {
 	return nil
 }
 
+// ResolvedTokenProfile 是活动配置档叠加的结果：Token 是叠加后的副本（未叠加时是
+// 原指针），RouteKeys 只在活动预设按渠道路由身份直接选择渠道时非空。
+type ResolvedTokenProfile struct {
+	Token       *Token
+	ProfileName string
+	PresetName  string
+	RouteKeys   []string
+}
+
 // ResolveActiveProfile 把当前活动的配置档（及其活动路由预设）叠加到令牌副本上，
 // 供请求路径复用令牌既有的字段消费方。未配置、active_profile 为空或找不到同名
 // 配置档时返回原指针与空名字。
 //
 // 返回的副本从不写回数据库；未覆盖的字段（Key/Quota/Group/AllowIps 等）保持原值。
-// Group 不是 auto、找不到预设或预设没有分组时静默跳过路由预设叠加。
-func (token *Token) ResolveActiveProfile() (effective *Token, profileName, presetName string) {
+// Group 不是 auto、找不到预设或预设没有分组时静默跳过路由预设叠加。direct 预设
+// （route_keys）只叠加跨分组重试并返回 RouteKeys 副本，渠道选择由调用方决定。
+func (token *Token) ResolveActiveProfile() ResolvedTokenProfile {
 	config := token.GetProfileConfig()
 	if config == nil || config.ActiveProfile == "" {
-		return token, "", ""
+		return ResolvedTokenProfile{Token: token}
 	}
 	index := slices.IndexFunc(config.Profiles, func(profile TokenProfile) bool {
 		return profile.Name == config.ActiveProfile
 	})
 	if index < 0 {
-		return token, "", ""
+		return ResolvedTokenProfile{Token: token}
 	}
 
 	profile := config.Profiles[index]
 	copied := *token
-	effective = &copied
+	resolved := ResolvedTokenProfile{Token: &copied, ProfileName: profile.Name}
 	if len(profile.ModelMapping) > 0 {
-		if err := effective.SetModelMapping(profile.ModelMapping); err != nil {
+		if err := copied.SetModelMapping(profile.ModelMapping); err != nil {
 			common.SysLog("failed to overlay token profile model mapping: " + err.Error())
 		}
 	}
 	if len(profile.ModelLimits) > 0 {
-		effective.ModelLimitsEnabled = true
-		effective.ModelLimits = strings.Join(profile.ModelLimits, ",")
+		copied.ModelLimitsEnabled = true
+		copied.ModelLimits = strings.Join(profile.ModelLimits, ",")
 	}
-	if profile.ActiveRoutePreset != "" && effective.Group == "auto" {
+	if profile.ActiveRoutePreset != "" && copied.Group == "auto" {
 		presetIndex := slices.IndexFunc(profile.RoutePresets, func(preset TokenRoutePreset) bool {
 			return preset.Name == profile.ActiveRoutePreset
 		})
-		// 空分组列表无法表达“清空”意图，按无效预设跳过，保留令牌原有分组。
-		if presetIndex >= 0 && len(profile.RoutePresets[presetIndex].AutoGroups) > 0 {
+		if presetIndex >= 0 {
 			preset := profile.RoutePresets[presetIndex]
-			if err := effective.SetAutoGroups(preset.AutoGroups); err != nil {
-				common.SysLog("failed to overlay token route preset groups: " + err.Error())
-			} else {
-				effective.CrossGroupRetry = preset.CrossGroupRetry
-				presetName = preset.Name
+			if preset.IsDirect() {
+				// direct 预设不写 AutoGroups：那不是官方分组，也不该出现在
+				// ContextKeyTokenAutoGroups 里，渠道选择留给调用方。
+				copied.CrossGroupRetry = preset.CrossGroupRetry
+				resolved.PresetName = preset.Name
+				resolved.RouteKeys = slices.Clone(preset.RouteKeys)
+			} else if len(preset.AutoGroups) > 0 {
+				// 空分组列表无法表达“清空”意图，按无效预设跳过，保留令牌原有分组。
+				if err := copied.SetAutoGroups(preset.AutoGroups); err != nil {
+					common.SysLog("failed to overlay token route preset groups: " + err.Error())
+				} else {
+					copied.CrossGroupRetry = preset.CrossGroupRetry
+					resolved.PresetName = preset.Name
+				}
 			}
 		}
 	}
-	return effective, profile.Name, presetName
+	return resolved
+}
+
+// CountTokensWithActiveDirectRoutePreset 统计活动预设按渠道路由身份直接选择渠道的
+// 令牌数量，供关闭功能开关前确认没有令牌仍在依赖它。
+func CountTokensWithActiveDirectRoutePreset() (int, error) {
+	var tokens []Token
+	// LIKE 只是预筛：profiles 是 text 列，三库都支持，真正的判定在 Go 里做。
+	if err := DB.Model(&Token{}).
+		Where("profiles LIKE ?", `%"route_keys"%`).
+		Select("id, profiles").
+		Find(&tokens).Error; err != nil {
+		return 0, err
+	}
+	count := 0
+	for i := range tokens {
+		config := tokens[i].GetProfileConfig()
+		if config == nil || config.ActiveProfile == "" {
+			continue
+		}
+		profileIndex := slices.IndexFunc(config.Profiles, func(profile TokenProfile) bool {
+			return profile.Name == config.ActiveProfile && profile.ActiveRoutePreset != ""
+		})
+		if profileIndex < 0 {
+			continue
+		}
+		profile := config.Profiles[profileIndex]
+		presetIndex := slices.IndexFunc(profile.RoutePresets, func(preset TokenRoutePreset) bool {
+			return preset.Name == profile.ActiveRoutePreset
+		})
+		if presetIndex >= 0 && profile.RoutePresets[presetIndex].IsDirect() {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // ParseTokenProfiles 严格解析并校验待保存的 profiles 文档，供保存接口在落库前调用。
@@ -296,6 +353,7 @@ func parseTokenProfile(document map[string]any) (TokenProfile, error) {
 }
 
 // parseTokenRoutePreset 校验单个路由预设；调用方负责补 `profile %q: ` 前缀。
+// auto_groups 与 route_keys 必须恰好配置一个非空列表。
 func parseTokenRoutePreset(document map[string]any) (TokenRoutePreset, error) {
 	rawName, err := tokenProfileStringField(document, "name", "route preset name")
 	if err != nil {
@@ -307,35 +365,66 @@ func parseTokenRoutePreset(document map[string]any) (TokenRoutePreset, error) {
 	}
 	preset := TokenRoutePreset{Name: name}
 
-	value, ok := document["auto_groups"]
-	if !ok || value == nil {
-		return TokenRoutePreset{}, fmt.Errorf("route preset %q must configure at least one auto group", name)
-	}
-	items, ok := value.([]any)
-	if !ok {
-		return TokenRoutePreset{}, fmt.Errorf("route preset %q: auto groups must be a JSON array", name)
-	}
-	groups := make([]string, 0, len(items))
-	seen := make(map[string]bool, len(items))
-	for _, item := range items {
-		group, ok := item.(string)
+	var groups []string
+	if value, ok := document["auto_groups"]; ok && value != nil {
+		items, ok := value.([]any)
 		if !ok {
-			return TokenRoutePreset{}, fmt.Errorf("route preset %q: auto group must be a string", name)
+			return TokenRoutePreset{}, fmt.Errorf("route preset %q: auto groups must be a JSON array", name)
 		}
-		group, err := normalizeTokenProfileName("auto group", group)
-		if err != nil {
-			return TokenRoutePreset{}, fmt.Errorf("route preset %q: %w", name, err)
+		seen := make(map[string]bool, len(items))
+		for _, item := range items {
+			group, ok := item.(string)
+			if !ok {
+				return TokenRoutePreset{}, fmt.Errorf("route preset %q: auto group must be a string", name)
+			}
+			group, err := normalizeTokenProfileName("auto group", group)
+			if err != nil {
+				return TokenRoutePreset{}, fmt.Errorf("route preset %q: %w", name, err)
+			}
+			if seen[group] {
+				return TokenRoutePreset{}, fmt.Errorf("route preset %q: duplicate auto group %q", name, group)
+			}
+			seen[group] = true
+			groups = append(groups, group)
 		}
-		if seen[group] {
-			return TokenRoutePreset{}, fmt.Errorf("route preset %q: duplicate auto group %q", name, group)
-		}
-		seen[group] = true
-		groups = append(groups, group)
 	}
-	if len(groups) == 0 {
-		return TokenRoutePreset{}, fmt.Errorf("route preset %q must configure at least one auto group", name)
+
+	var keys []string
+	if value, ok := document["route_keys"]; ok && value != nil {
+		items, ok := value.([]any)
+		if !ok {
+			return TokenRoutePreset{}, fmt.Errorf("route preset %q: route keys must be a JSON array", name)
+		}
+		seen := make(map[string]bool, len(items))
+		for _, item := range items {
+			key, ok := item.(string)
+			if !ok {
+				return TokenRoutePreset{}, fmt.Errorf("route preset %q: route key must be a string", name)
+			}
+			key = strings.TrimSpace(key)
+			if !IsValidChannelRouteKey(key) {
+				return TokenRoutePreset{}, fmt.Errorf("route preset %q: route key %q is invalid", name, key)
+			}
+			if seen[key] {
+				return TokenRoutePreset{}, fmt.Errorf("route preset %q: duplicate route key %q", name, key)
+			}
+			seen[key] = true
+			keys = append(keys, key)
+		}
 	}
-	preset.AutoGroups = groups
+
+	switch {
+	case len(groups) == 0 && len(keys) == 0:
+		return TokenRoutePreset{}, fmt.Errorf("route preset %q must configure either auto_groups or route_keys", name)
+	case len(groups) > 0 && len(keys) > 0:
+		return TokenRoutePreset{}, fmt.Errorf("route preset %q must not configure both auto_groups and route_keys", name)
+	}
+	if len(groups) > 0 {
+		preset.AutoGroups = groups
+	}
+	if len(keys) > 0 {
+		preset.RouteKeys = keys
+	}
 
 	if value, ok := document["cross_group_retry"]; ok && value != nil {
 		retry, ok := value.(bool)

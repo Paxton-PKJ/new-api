@@ -142,6 +142,11 @@ var RetryTimes = 0
 var DefaultSameChannelRetryTimes = 0
 var MaxTotalAttempts = 0
 
+// EnableDirectChannelRouting gates route presets that select channels by
+// route_key. MaxRoutePresetChannels caps how many channels one preset may list.
+var EnableDirectChannelRouting = false
+var MaxRoutePresetChannels = 10
+
 //var RootUserEmail = ""
 
 var IsMasterNode bool

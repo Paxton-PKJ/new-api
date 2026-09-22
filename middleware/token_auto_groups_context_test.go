@@ -107,6 +107,25 @@ func TestSetupContextForTokenAppliesActiveProfile(t *testing.T) {
 		assert.False(t, preset)
 	})
 
+	t.Run("direct route preset keeps the auto groups unset", func(t *testing.T) {
+		const directProfiles = `{"active_profile":"dsv4f","profiles":[{"name":"dsv4f","active_route_preset":"direct","route_presets":[{"name":"direct","route_keys":["ch_0123456789AbCdEf"],"cross_group_retry":true}]}]}`
+		ctx := newTokenAutoGroupsContext()
+		token := &model.Token{
+			Id:              1,
+			UserId:          2,
+			Group:           "auto",
+			CrossGroupRetry: false,
+			Profiles:        common.GetPointer(directProfiles),
+		}
+
+		require.NoError(t, SetupContextForToken(ctx, token))
+		_, ok := common.GetContextKey(ctx, constant.ContextKeyTokenAutoGroups)
+		assert.False(t, ok, "a direct preset selects channels by route key, not by auto groups")
+		assert.True(t, common.GetContextKeyBool(ctx, constant.ContextKeyTokenCrossGroupRetry))
+		assert.Equal(t, "dsv4f", common.GetContextKeyString(ctx, constant.ContextKeyTokenProfile))
+		assert.Equal(t, "direct", common.GetContextKeyString(ctx, constant.ContextKeyTokenRoutePreset))
+	})
+
 	t.Run("non auto group ignores the route preset", func(t *testing.T) {
 		ctx := newTokenAutoGroupsContext()
 		require.NoError(t, SetupContextForToken(ctx, newProfiledToken("default")))
