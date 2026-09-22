@@ -94,6 +94,14 @@ func TestChannelHasSensitiveChanges(t *testing.T) {
 			"response_time": updated.ResponseTime,
 		}))
 	})
+
+	t.Run("route key is read-only", func(t *testing.T) {
+		updated := PatchChannel{Channel: *origin}
+		clientKey := "ch_clientSupplied01"
+		updated.RouteKey = &clientKey
+
+		assert.False(t, channelHasSensitiveChanges(&updated, origin, map[string]any{"route_key": clientKey}))
+	})
 }
 
 func TestClearChannelReadOnlyFields(t *testing.T) {
@@ -127,6 +135,15 @@ func TestClearChannelReadOnlyFields(t *testing.T) {
 	assert.Zero(t, channel.UsedQuota)
 	assert.Equal(t, "gpt-4o", channel.Models)
 	assert.Equal(t, "default", channel.Group)
+}
+
+func TestClearChannelReadOnlyFieldsDropsRouteKey(t *testing.T) {
+	routeKey := "ch_clientSupplied01"
+	channel := PatchChannel{Channel: model.Channel{RouteKey: &routeKey}}
+
+	clearChannelReadOnlyFields(&channel, map[string]any{"route_key": routeKey})
+
+	assert.Nil(t, channel.RouteKey)
 }
 
 func TestUpdateChannelRejectsStatusField(t *testing.T) {

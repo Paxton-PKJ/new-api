@@ -55,8 +55,23 @@ type Channel struct {
 
 	OtherSettings string `json:"settings" gorm:"column:settings"` // 其他设置，存储azure版本等不需要检索的信息，详见dto.ChannelOtherSettings
 
+	// RouteKey 是渠道的稳定路由身份：创建时生成、改名不变、复制时重新生成、随数据库 dump 保留。
+	RouteKey *string `json:"route_key" gorm:"type:varchar(32);uniqueIndex:idx_channels_route_key"`
+
 	// cache info
 	Keys []string `json:"-" gorm:"-"`
+}
+
+func (channel *Channel) BeforeCreate(_ *gorm.DB) error {
+	if channel.GetRouteKey() != "" {
+		return nil
+	}
+	key, err := GenerateChannelRouteKey()
+	if err != nil {
+		return err
+	}
+	channel.RouteKey = &key
+	return nil
 }
 
 const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"

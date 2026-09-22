@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # fork-only dev workflow helper, exclude from upstream PR.
 #
-# Upgrade + idempotency check for the token text columns added by this fork
-# (model_mapping, profiles):
+# Upgrade + idempotency check for the columns added by this fork:
+#   tokens.model_mapping / tokens.profiles (nullable text), and
+#   channels.route_key (nullable varchar(32) with a unique index).
 #   1. the upstream baseline binary creates the schema,
-#   2. a legacy token row is inserted,
+#   2. a legacy token row and a legacy channel row are inserted,
 #   3. the head binary starts twice (once with Redis enabled),
 #   4. tokens.model_mapping and tokens.profiles must be nullable text, the legacy
-#      row must stay NULL in both, and both head startups must produce an
-#      identical schema.
+#      token row must stay NULL in both, channels.route_key must exist with its
+#      unique index and the legacy channel row must be backfilled to a valid
+#      route key, the second startup must not change that key, and both head
+#      startups must produce an identical schema for both tables.
 #
 # Usage: dev-ci-db-upgrade.sh <sqlite|mysql|postgres>
 # Requires pre-built binaries at /tmp/new-api-baseline and /tmp/new-api-head.
@@ -16,6 +19,9 @@ set -euo pipefail
 
 # token columns that must exist as nullable text after the head migration.
 token_text_columns="model_mapping profiles"
+# channel column that must exist as a nullable varchar(32) after the head migration.
+channel_varchar_columns="route_key"
+channel_route_key_pattern='^ch_[0-9A-Za-z]{16}$'
 
 dialect="${1:-}"
 case "$dialect" in
@@ -42,21 +48,26 @@ done
 # 48-character legacy token key, matching the pre-varchar(128) key format.
 legacy_key=$(printf '%-48s' 'legacy-upgrade-token' | tr ' ' '0')
 legacy_name='legacy-upgrade-token'
+legacy_channel_key='legacy-channel-key'
+legacy_channel_name='legacy-upgrade-channel'
 
 case "$dialect" in
   mysql)
     db_name=na_up_m80
     app_sql_dsn="root:123456@tcp(127.0.0.1:3306)/${db_name}?charset=utf8mb4&parseTime=True&loc=Local"
     key_column='`key`'
+    group_column='`group`'
     ;;
   postgres)
     db_name=na_up_p15
     app_sql_dsn="postgres://root:123456@127.0.0.1:5432/${db_name}?sslmode=disable"
     key_column='"key"'
+    group_column='"group"'
     ;;
   sqlite)
     sqlite_path=/tmp/na_up.db
     key_column='"key"'
+    group_column='"group"'
     ;;
 esac
 
@@ -183,32 +194,37 @@ case "$dialect" in
 esac
 echo "inserted legacy token row (key=${legacy_key}, ${#legacy_key} chars)"
 
-columns_snapshot() {
+run_sql "INSERT INTO channels (type, ${key_column}, status, name, created_time, models, ${group_column}, priority, weight, auto_ban, used_quota)
+  VALUES (1, '${legacy_channel_key}', 1, '${legacy_channel_name}', 1, 'gpt-4o', 'default', 0, 0, 1, 0)"
+echo "inserted legacy channel row (key=${legacy_channel_key})"
+
+columns_snapshot() { # columns_snapshot <table>
+  local table="$1"
   case "$dialect" in
     mysql)
       run_sql "SELECT column_name, column_type, is_nullable FROM information_schema.columns
-        WHERE table_schema = DATABASE() AND table_name = 'tokens' ORDER BY column_name"
+        WHERE table_schema = DATABASE() AND table_name = '${table}' ORDER BY column_name"
       ;;
     postgres)
       run_sql "SELECT column_name, data_type, is_nullable FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name = 'tokens' ORDER BY column_name"
+        WHERE table_schema = current_schema() AND table_name = '${table}' ORDER BY column_name"
       ;;
     sqlite)
       # "notnull" is a keyword and must stay quoted in this CASE expression.
-      run_sql "SELECT name, type, CASE \"notnull\" WHEN 0 THEN 'YES' ELSE 'NO' END FROM pragma_table_info('tokens') ORDER BY name"
+      run_sql "SELECT name, type, CASE \"notnull\" WHEN 0 THEN 'YES' ELSE 'NO' END FROM pragma_table_info('${table}') ORDER BY name"
       ;;
   esac | tr '\t' '|' | tr -d '\r'
 }
 
-print_columns() {
-  echo "tokens columns (${dialect}):"
-  columns_snapshot | tr 'A-Z' 'a-z'
+print_columns() { # print_columns <table>
+  echo "$1 columns (${dialect}):"
+  columns_snapshot "$1" | tr 'A-Z' 'a-z'
 }
 
-assert_column_present() {
+assert_token_text_columns_present() {
   local snapshot
-  snapshot=$(columns_snapshot | tr 'A-Z' 'a-z')
-  print_columns
+  snapshot=$(columns_snapshot tokens | tr 'A-Z' 'a-z')
+  print_columns tokens
   if [ -z "$snapshot" ]; then
     echo "::error::tokens table missing on ${dialect}"
     exit 1
@@ -223,62 +239,139 @@ assert_column_present() {
   done
 }
 
-assert_column_absent() {
+assert_channel_route_key_column_present() {
   local snapshot
-  snapshot=$(columns_snapshot | tr 'A-Z' 'a-z')
-  print_columns
+  snapshot=$(columns_snapshot channels | tr 'A-Z' 'a-z')
+  print_columns channels
   if [ -z "$snapshot" ]; then
+    echo "::error::channels table missing on ${dialect}"
+    exit 1
+  fi
+  local column
+  for column in $channel_varchar_columns; do
+    case "$dialect" in
+      mysql | sqlite) local expected="${column}|varchar(32)|yes" ;;
+      postgres) local expected="${column}|character varying|yes" ;;
+    esac
+    if ! grep -qx "$expected" <<<"$snapshot"; then
+      echo "::error::expected a nullable varchar(32) column channels.${column} on ${dialect} (got: $(grep "^${column}|" <<<"$snapshot"))"
+      exit 1
+    fi
+    echo "OK: channels.${column} is varchar(32) and nullable (${dialect})"
+  done
+}
+
+channel_route_key_index_snapshot() {
+  case "$dialect" in
+    mysql)
+      run_sql "SELECT index_name, non_unique, column_name FROM information_schema.statistics
+        WHERE table_schema = DATABASE() AND table_name = 'channels' AND non_unique = 0
+        ORDER BY index_name, seq_in_index"
+      ;;
+    postgres)
+      run_sql "SELECT indexname, indexdef FROM pg_indexes
+        WHERE schemaname = current_schema() AND tablename = 'channels' AND indexdef LIKE '%UNIQUE%' AND indexdef LIKE '%route_key%'"
+      ;;
+    sqlite)
+      run_sql "SELECT il.name, ii.name FROM pragma_index_list('channels') il
+        JOIN pragma_index_info(il.name) ii WHERE il.\"unique\" = 1 ORDER BY il.name, ii.seqno"
+      ;;
+  esac | tr '\t' '|' | tr -d '\r'
+}
+
+assert_channel_route_key_index_present() {
+  local snapshot
+  snapshot=$(channel_route_key_index_snapshot)
+  echo "channels unique indexes (${dialect}):"
+  if [ -n "$snapshot" ]; then
+    echo "$snapshot"
+  fi
+  if ! grep -q 'route_key' <<<"$snapshot"; then
+    echo "::error::channels has no unique index covering route_key on ${dialect}"
+    exit 1
+  fi
+  echo "OK: channels has a unique index covering route_key (${dialect})"
+}
+
+assert_columns_absent_in_baseline() {
+  local tokens_snapshot channels_snapshot
+  tokens_snapshot=$(columns_snapshot tokens | tr 'A-Z' 'a-z')
+  channels_snapshot=$(columns_snapshot channels | tr 'A-Z' 'a-z')
+  print_columns tokens
+  print_columns channels
+  if [ -z "$tokens_snapshot" ]; then
     echo "::error::baseline binary did not create the tokens table on ${dialect}"
+    exit 1
+  fi
+  if [ -z "$channels_snapshot" ]; then
+    echo "::error::baseline binary did not create the channels table on ${dialect}"
     exit 1
   fi
   local column
   for column in $token_text_columns; do
-    if grep -q "^${column}|" <<<"$snapshot"; then
+    if grep -q "^${column}|" <<<"$tokens_snapshot"; then
       echo "::error::baseline schema already contains tokens.${column} on ${dialect}"
       exit 1
     fi
     echo "OK: baseline schema has no tokens.${column} column (${dialect})"
   done
+  for column in $channel_varchar_columns; do
+    if grep -q "^${column}|" <<<"$channels_snapshot"; then
+      echo "::error::baseline schema already contains channels.${column} on ${dialect}"
+      exit 1
+    fi
+    echo "OK: baseline schema has no channels.${column} column (${dialect})"
+  done
 }
 
-schema_dump() {
+schema_dump() { # schema_dump <table>
+  local table="$1"
   case "$dialect" in
     mysql)
-      run_mysql_admin "SHOW CREATE TABLE ${db_name}.tokens"
+      run_mysql_admin "SHOW CREATE TABLE ${db_name}.${table}"
       ;;
     postgres)
       PGPASSWORD=123456 psql --host=127.0.0.1 --port=5432 --username=root \
-        --dbname="$db_name" --command '\d tokens'
+        --dbname="$db_name" --command "\d ${table}"
       ;;
     sqlite)
-      sqlite3 "$sqlite_path" ".schema tokens"
+      sqlite3 "$sqlite_path" ".schema ${table}"
       ;;
   esac | tr -d '\r'
 }
 
-assert_column_absent
+changed_schema_dump() {
+  { schema_dump tokens; schema_dump channels; } | grep -v '^$' || true
+}
+
+assert_columns_absent_in_baseline
 
 echo "==> 2/3 head startup #1 on ${dialect} (Redis enabled)"
 start_app "$head_bin" on /tmp/dev-ci-head-1.log
 stop_app
-schema_dump >/tmp/dev-ci-schema-head-1.sql
+changed_schema_dump >/tmp/dev-ci-schema-head-1.sql
 echo "schema after head startup #1:"
 cat /tmp/dev-ci-schema-head-1.sql
+
+legacy_route_key_after_first=$(run_sql "SELECT route_key FROM channels WHERE name = '${legacy_channel_name}'" | tr -d '[:space:]')
+echo "legacy channel route_key after head startup #1: ${legacy_route_key_after_first}"
 
 echo "==> 3/3 head startup #2 on ${dialect} (Redis disabled)"
 start_app "$head_bin" off /tmp/dev-ci-head-2.log
 stop_app
-schema_dump >/tmp/dev-ci-schema-head-2.sql
+changed_schema_dump >/tmp/dev-ci-schema-head-2.sql
 echo "schema after head startup #2:"
 cat /tmp/dev-ci-schema-head-2.sql
 
 if ! diff -u /tmp/dev-ci-schema-head-1.sql /tmp/dev-ci-schema-head-2.sql; then
-  echo "::error::tokens schema changed between two head startups on ${dialect}"
+  echo "::error::tokens/channels schema changed between two head startups on ${dialect}"
   exit 1
 fi
 echo "OK: schema diff between the two head startups is empty (${dialect})"
 
-assert_column_present
+assert_token_text_columns_present
+assert_channel_route_key_column_present
+assert_channel_route_key_index_present
 
 legacy_key_state=$(run_sql "SELECT ${key_column} FROM tokens WHERE ${key_column} = '${legacy_key}'" | tr -d '[:space:]')
 for column in $token_text_columns; do
@@ -293,5 +386,18 @@ if [ "$legacy_key_state" != "$legacy_key" ]; then
   echo "::error::legacy token key was not preserved on ${dialect}"
   exit 1
 fi
+
+if ! [[ "$legacy_route_key_after_first" =~ $channel_route_key_pattern ]]; then
+  echo "::error::legacy channel row was not backfilled with a valid route_key on ${dialect}: '${legacy_route_key_after_first}'"
+  exit 1
+fi
+echo "OK: legacy channel row route_key matches ${channel_route_key_pattern} (${dialect})"
+
+legacy_route_key_after_second=$(run_sql "SELECT route_key FROM channels WHERE name = '${legacy_channel_name}'" | tr -d '[:space:]')
+if [ "$legacy_route_key_after_first" != "$legacy_route_key_after_second" ]; then
+  echo "::error::legacy channel route_key changed between head startups on ${dialect} ('${legacy_route_key_after_first}' -> '${legacy_route_key_after_second}')"
+  exit 1
+fi
+echo "OK: legacy channel route_key is unchanged after the second head startup (${dialect})"
 
 echo "PASS: ${dialect} upgrade + idempotency checks are green"

@@ -779,6 +779,9 @@ func AddChannel(c *gin.Context) {
 	}
 
 	addChannelRequest.Channel.CreatedTime = common.GetTimestamp()
+	// 路由身份由服务端生成：批量模式下每个渠道各自在创建钩子里取新值，
+	// 请求体提供的值被丢弃。
+	addChannelRequest.Channel.RouteKey = nil
 	keys := make([]string, 0)
 	switch addChannelRequest.Mode {
 	case "multi_to_single":
@@ -1644,6 +1647,8 @@ func CopyChannel(c *gin.Context) {
 	// clone channel
 	clone := *origin // shallow copy is sufficient as we will overwrite primitives
 	clone.Id = 0     // let DB auto-generate
+	// 副本必须获得自己的路由身份，否则两个渠道的路由身份会指向同一条源渠道。
+	clone.RouteKey = nil
 	clone.CreatedTime = common.GetTimestamp()
 	clone.Name = origin.Name + suffix
 	clone.TestTime = 0
